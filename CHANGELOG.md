@@ -1,3 +1,56 @@
+## [0.3.0] - 2026-09-06
+
+### 🚀 Features
+
+- Expose docq Engine and config as a library target by adding src/lib.rs and a [lib] section in Cargo.toml
+- *(indexer)* Add IndexEvent enum for indexing progress callbacks
+- *(engine, storage)* Add file collection and collection removal APIs
+- *(retrieve)* Add streaming search API with stage events and timings; make pipeline core return Result so errors propagate
+- *(engine)* Expose public `search_stream` API forwarding retriever events
+- *(index)* Add streaming index APIs (index_stream, index_one_stream, index_sources_stream) with stage events and full stats; refactor!: replace progress callbacks with streams and move task spawning into Indexer; fix(logging): log event content on stream send failures
+
+### 🐛 Bug Fixes
+
+- Detect embedding model and indexing config changes via meta table to force full reindex and prevent stale vectors
+- Track real byte offsets in SentenceSplitter so chunk byte_ranges point to correct positions in original text
+- *(storage)* Negate FTS5 bm25() scores so ScoreExplain follows the higher-is-better convention; doc(retrieve): update bm25_score comment to reflect negation; doc(optimize): mark bm25 score semantics item as completed
+- *(test-integration)* Isolate test workspace in temp dir
+- *(retriever)* Sort scored rerank candidates first
+
+### 🚜 Refactor
+
+- Move vector distance-to-similarity conversion from retriever to storage layer for consistent score direction
+- Implement std::ops::Add for IndexStats to replace manual merge method
+- *(retriever)* Extract named rerank score comparator
+- *(engine)* [**breaking**] Put `name` first in collection APIs
+- Rename project from docq to semquery across crates, binary (semq), config dirs, docs, and CI
+- Rename project from docq to semquery across crates, binary (semq), config dirs, docs, and CI
+
+### 📚 Documentation
+
+- *(test-integration)* Align header comment with config scope
+- Update docs
+
+### ⚡ Performance
+
+- Stream file reading in index_directory via list_files to reduce peak memory from all-file-contents to per-batch size
+- Parallelize file reading and chunking in index_directory using rayon for overlapping I/O and CPU work
+- Batch storage writes in groups of 5 files per transaction to reduce fsync overhead
+- Replace per-byte format! in sha256_hex with pre-allocated lookup table to eliminate string allocations
+- Add SQLite synchronous=NORMAL, cache_size=64MB, and chunk_documents(doc_id) index to reduce write amplification and delete scan cost
+
+### 🧪 Testing
+
+- Add concurrent read and read-write tests for SqliteStorage to verify thread safety under WAL mode
+- *(retriever)* Assert unscored RRF fallback and ordering contract
+- *(retriever)* Use ascii-only fixture texts
+- *(retriever)* Extract shared config factory to reduce duplication
+- Isolate integration config from user home
+
+### ⚙️ Miscellaneous Tasks
+
+- Add pre-commit-check.sh
+- Update agents.md
 ## [0.2.0] - 2026-08-23
 
 ### 🚀 Features
@@ -5,7 +58,7 @@
 - *(indexer)* Route single-file indexing through ReaderRegistry and add a per-extension read_file API
 - *(storage)* Create vector table with dynamic dimension from embedder instead of hardcoded 512
 - *(logging)* Introduce flexi_logger for file-based logging with configurable path, size rotation, and optional stderr duplication via config.toml and CLI flags
-- *(verbose)* Route Verbose progress messages to the log file under the 'semquery' target and ensure they remain visible on the terminal when log duplication is disabled
+- *(verbose)* Route Verbose progress messages to the log file under the 'docq' target and ensure they remain visible on the terminal when log duplication is disabled
 - Enable Metal GPU acceleration and suppress ggml_metal_device_init log noise via early ggml_log_set no-op callback
 
 ### 🐛 Bug Fixes
@@ -24,8 +77,8 @@
 - *(engine)* Extract base model-loading helper including ModelHub creation for open_for_index, open_for_search, and open_for_ask
 - *(engine)* Extract base model-loading helper including ModelHub creation for open_for_index, open_for_search, and open_for_ask
 - *(retriever)* Flatten Retriever to own its component fields directly from RetrieverConfig
-- *(semquery-retrieve)* Split hybrid search pipeline into focused helpers; feat(fusion): generalize RRF to multiple recall channels; doc(semquery-retrieve): document each retrieval stage and score semantics
-- *(semquery-synth)* Move Synthesizer and SynthesizerConfig into synthesizer.rs and flatten config fields directly onto the struct
+- *(docq-retrieve)* Split hybrid search pipeline into focused helpers; feat(fusion): generalize RRF to multiple recall channels; doc(docq-retrieve): document each retrieval stage and score semantics
+- *(docq-synth)* Move Synthesizer and SynthesizerConfig into synthesizer.rs and flatten config fields directly onto the struct
 - Replace all Other(String) error variants with structured variants across 6 error enums
 - Extract Indexer struct, IndexStats, and tests into indexer.rs, and split run_command into per-subcommand handler functions
 - Replace ModelSpec.role String with ModelRole enum across all crates
@@ -33,6 +86,8 @@
 ### 📚 Documentation
 
 - Update docs
+- Add CHANGELOG for v0.2.0
+- Update crate config in Linux and windows
 
 ### ⚡ Performance
 
@@ -41,11 +96,16 @@
 - Cache token_count in chunker, batch-petch document hashes, and pass is_update to eliminate redundant DB queries in indexer
 - Switch default reranker from BGE-reranker-base to jina-reranker-v1-turbo-en for 4x faster reranking
 - Switch default reranker from BGE-reranker-base to jina-reranker-v1-turbo-en for 4x faster reranking
+
+### ⚙️ Miscellaneous Tasks
+
+- V0.2.0
+- V0.2.0
 ## [0.1.0] - 2026-08-15
 
 ### 🚀 Features
 
-- Scaffold workspace with semquery-core types, traits, and error taxonomy
+- Scaffold workspace with docq-core types, traits, and error taxonomy
 - Implement SQLite-backed Storage with documents, chunks, and model versions CRUD
 - Integrate sqlite-vec and FTS5 vector and full-text search into SqliteStorage
 - Add ModelRegistry defaults and ModelHub with HuggingFace download/cache and model version recording
@@ -62,7 +122,7 @@
 - *(cli)* Support custom config files via --config/-c and auto-create the global default config.toml on every command
 - *(cli)* Support custom config files via --config/-c and auto-create the global default config.toml on every command
 - *(cli)* Add -v/--verbose global flag and per-step timing output for index, search and ask
-- *(indexer)* Abstract FileReader trait and ReaderRegistry dispatcher for pluggable PDF/DOC/text readers; refactor(core): move DocumentSource to semquery-core for cross-crate reuse
+- *(indexer)* Abstract FileReader trait and ReaderRegistry dispatcher for pluggable PDF/DOC/text readers; refactor(core): move DocumentSource to docq-core for cross-crate reuse
 - *(indexer)* Add PDF support via pdf-extract behind the `pdf` feature and register PdfReader in default readers; doc(testdata): reorganize bundled example docs into testdata/md and add a sample PDF
 - *(indexer)* Add DOCX reader with zip + quick-xml
 
