@@ -1,7 +1,7 @@
 //! Global default configuration loaded from `config.toml`.
 //!
 //! The configuration file lives in the platform-specific default config
-//! directory (e.g. `~/.config/semquery`) and controls which models to use, how
+//! directory (e.g. `~/.config/semq`) and controls which models to use, how
 //! documents are chunked, and how retrieval / generation behave. It is loaded
 //! independently of the workspace (data) directory.
 
@@ -93,7 +93,7 @@ pub struct LoggingConfig {
   /// target filtering like "semquery=debug,semquery_core=info".
   pub level: String,
   /// Optional log file path. If relative, resolved against the workspace.
-  /// Defaults to `<workspace>/semquery.log` when omitted.
+  /// Defaults to `<workspace>/semq.log` when omitted.
   pub file: Option<PathBuf>,
   /// Rotate the log file when it exceeds this size in megabytes.
   pub rotation_size_mb: usize,

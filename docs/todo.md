@@ -153,7 +153,7 @@
 
 ### P3-28. ~~换更快的 reranker~~ ✅ 已完成
 
-- 文件：`~/.config/semquery/config.toml`
+- 文件：`~/.config/semq/config.toml`
 - 改动：reranker 从 `BAAI/bge-reranker-base` 换为 `jinaai/jina-reranker-v1-turbo-en`。rerank 从 3144ms → 731ms（4.3 倍），ask 总耗时从 11.9s → 6.5s。回答质量可接受。
 
 ### P4-29. 智能模型选择策略

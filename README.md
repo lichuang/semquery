@@ -37,7 +37,7 @@
 # Install from source
 cargo install --path crates/semquery
 
-# Create a workspace (uses ~/.config/semquery by default)
+# Create a workspace (uses ~/.config/semq by default)
 semq init
 
 # Add a directory of documents
@@ -124,7 +124,7 @@ Examples:
 
 ```bash
 semq --workspace ./project-kb init
-semq --workspace ./project-kb --config ./project-kb/semquery.toml add ./docs --name docs
+semq --workspace ./project-kb --config ./project-kb/semq.toml add ./docs --name docs
 semq --workspace ./project-kb search "deployment checklist" --json
 ```
 
@@ -148,14 +148,14 @@ semq search "budget approval" --explain
 
 The global configuration file is created automatically on first run:
 
-- macOS / Linux: `~/.config/semquery/config.toml`
-- Windows: `%LOCALAPPDATA%\semquery\config.toml`
+- macOS / Linux: `~/.config/semq/config.toml`
+- Windows: `%LOCALAPPDATA%\semq\config.toml`
 
 Override it with `--config`.
 
 ## 📥 First-use downloads
 
-The first time you index, search, or ask, `semquery` downloads the required local models to `--model-cache` (`~/.cache/semquery/models` by default). After that, everything works offline.
+The first time you index, search, or ask, `semq` downloads the required local models to `--model-cache` (`~/.cache/semq/models` by default). After that, everything works offline.
 
 ## 🎮 GPU acceleration
 
@@ -177,7 +177,7 @@ Install the [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit), then:
 cargo install semquery --features llama-cpp-2/cuda
 ```
 
-If no GPU is available at runtime, `semquery` automatically falls back to CPU.
+If no GPU is available at runtime, `semq` automatically falls back to CPU.
 
 ## 🗺️ Roadmap
 
@@ -185,7 +185,7 @@ If no GPU is available at runtime, `semquery` automatically falls back to CPU.
 - [ ] LLM query expansion for hybrid retrieval
 - [ ] xlsx / csv indexing
 - [ ] File-watcher auto-indexing
-- [ ] `semquery model` subcommand for model management
+- [ ] `semq model` subcommand for model management
 - [ ] Customizable output formats (e.g. JSON, CSV, Markdown)
 - [ ] Cited answers with source snippets and referenced content
 - [ ] Prebuilt release binaries

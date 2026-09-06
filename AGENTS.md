@@ -12,6 +12,21 @@
 
 See `README.md` for the project overview.
 
+## Naming convention
+
+The project uses two names with distinct roles:
+
+- **`semquery`** = project / package name (developer layer, `cargo add semquery`).
+- **`semq`** = command / runtime name (user layer, the command you type and the directories you see).
+
+So the project is named `semquery`, the CLI command is `semq`. Sub-crates keep the `semquery-*` prefix (`semquery-core`, `semquery-model`, ...) following the Rust convention of prefixing sub-crates with the main crate name.
+
+Runtime artifacts (config dir, cache dir, DB file, log file) use `semq` to match the command name:
+- `~/.config/semq`
+- `~/.cache/semq/models`
+- `semq.db`
+- `semq.log`
+
 ## Common commands
 
 ```bash

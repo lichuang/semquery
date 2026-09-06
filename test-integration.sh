@@ -29,7 +29,7 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 WORKSPACE="$TEST_ROOT/workspace"
 
 # Save this path before HOME changes.
-MODEL_CACHE="${SEMQ_MODEL_CACHE:-$HOME/.cache/semquery/models}"
+MODEL_CACHE="${SEMQ_MODEL_CACHE:-$HOME/.cache/semq/models}"
 
 export HOME="$TEST_ROOT/home"
 export XDG_CONFIG_HOME="$TEST_ROOT/config"

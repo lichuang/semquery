@@ -37,7 +37,7 @@ pub struct SqliteStorage {
   conn: Arc<Mutex<Connection>>,
 }
 
-const DB_FILE_NAME: &str = "semquery.db";
+const DB_FILE_NAME: &str = "semq.db";
 
 impl SqliteStorage {
   pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -74,7 +74,7 @@ impl SqliteStorage {
   }
 
   /// Open the default SQLite database inside a workspace directory.
-  /// Keeps the concrete filename (`semquery.db`) encapsulated in the storage crate
+  /// Keeps the concrete filename (`semq.db`) encapsulated in the storage crate
   /// so callers don't assume SQLite implementation details.
   pub fn open_workspace(workspace: impl AsRef<Path>) -> Result<Self> {
     let path = workspace.as_ref().join(DB_FILE_NAME);

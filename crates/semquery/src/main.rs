@@ -22,15 +22,15 @@ pub use engine::{Engine, EngineComponents, EngineConfig};
   about = "Local-first RAG: hybrid search and cited answers over your documents (downloads models on first use)"
 )]
 struct Cli {
-  /// Workspace directory path (default: ~/.config/semquery on Unix, %LOCALAPPDATA%\semquery on Windows).
+  /// Workspace directory path (default: ~/.config/semq on Unix, %LOCALAPPDATA%\semq on Windows).
   #[arg(long, global = true)]
   workspace: Option<PathBuf>,
 
-  /// Model cache directory (default: ~/.cache/semquery/models).
+  /// Model cache directory (default: ~/.cache/semq/models).
   #[arg(long, global = true)]
   model_cache: Option<PathBuf>,
 
-  /// Path to a custom configuration file (default: ~/.config/semquery/config.toml).
+  /// Path to a custom configuration file (default: ~/.config/semq/config.toml).
   #[arg(short = 'c', long, global = true)]
   config: Option<PathBuf>,
 
@@ -38,7 +38,7 @@ struct Cli {
   #[arg(short = 'v', long, global = true, action = clap::ArgAction::Count)]
   verbose: u8,
 
-  /// Log file path (default: <workspace>/semquery.log). Overrides the config file.
+  /// Log file path (default: <workspace>/semq.log). Overrides the config file.
   #[arg(long, global = true)]
   log_file: Option<PathBuf>,
 
@@ -100,7 +100,7 @@ enum Commands {
 
 fn default_workspace() -> PathBuf {
   // Use XDG-style config directories on Unix and the standard local app data
-  // directory on Windows. This keeps the workspace (config.toml + semquery.db) in
+  // directory on Windows. This keeps the workspace (config.toml + semq.db) in
   // the conventional per-platform config location.
   #[cfg(target_os = "macos")]
   {
@@ -116,7 +116,7 @@ fn default_workspace() -> PathBuf {
   }
   #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
   {
-    dirs::home_dir().unwrap_or_default().join(".semquery")
+    dirs::home_dir().unwrap_or_default().join(".semq")
   }
 }
 
@@ -139,7 +139,7 @@ fn default_config_dir() -> PathBuf {
   }
   #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
   {
-    dirs::home_dir().unwrap_or_default().join(".semquery")
+    dirs::home_dir().unwrap_or_default().join(".semq")
   }
 }
 
@@ -210,7 +210,7 @@ async fn main() {
 /// The log file path is resolved in this order:
 /// 1. `--log-file` CLI argument.
 /// 2. `logging.file` from `config.toml`.
-/// 3. `<workspace>/semquery.log` as the default.
+/// 3. `<workspace>/semq.log` as the default.
 ///
 /// Relative paths are resolved against the workspace. The log file is rotated
 /// by size and old rotated files are cleaned up automatically.
@@ -230,7 +230,7 @@ fn init_logger(
   let log_path = log_file
     .map(PathBuf::from)
     .or_else(|| logging.file.clone())
-    .unwrap_or_else(|| workspace.join("semquery.log"));
+    .unwrap_or_else(|| workspace.join("semq.log"));
   let log_path = if log_path.is_absolute() {
     log_path
   } else {
