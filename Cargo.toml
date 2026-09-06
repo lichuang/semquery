@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.95"
 
@@ -47,12 +47,12 @@ zip = "2"
 quick-xml = "0.37"
 tempfile = "3"
 lopdf = "0.42"
-semquery-core = { path = "crates/semquery-core", version = "0.2.0" }
-semquery-model = { path = "crates/semquery-model", version = "0.2.0" }
-semquery-indexer = { path = "crates/semquery-indexer", version = "0.2.0" }
-semquery-storage = { path = "crates/semquery-storage", version = "0.2.0" }
-semquery-retrieve = { path = "crates/semquery-retrieve", version = "0.2.0" }
-semquery-synth = { path = "crates/semquery-synth", version = "0.2.0" }
+semquery-core = { path = "crates/semquery-core", version = "0.3.0" }
+semquery-model = { path = "crates/semquery-model", version = "0.3.0" }
+semquery-indexer = { path = "crates/semquery-indexer", version = "0.3.0" }
+semquery-storage = { path = "crates/semquery-storage", version = "0.3.0" }
+semquery-retrieve = { path = "crates/semquery-retrieve", version = "0.3.0" }
+semquery-synth = { path = "crates/semquery-synth", version = "0.3.0" }
 
 # esaxx-rs 0.1.10 unconditionally forces /MT on Windows, which conflicts with
 # other C/C++ dependencies (e.g. llama.cpp) that use /MD. Vendor a patched copy

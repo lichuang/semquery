@@ -1,4 +1,13 @@
-[env]
+[target.x86_64-unknown-linux-gnu.env]
+CFLAGS = "-Wno-elaborated-enum-base"
+CXXFLAGS = "-Wno-elaborated-enum-base"
+
+[target.aarch64-apple-darwin.env]
+GGML_METAL = "ON"
+CFLAGS = "-Wno-elaborated-enum-base"
+CXXFLAGS = "-Wno-elaborated-enum-base"
+
+[target.x86_64-apple-darwin.env]
 GGML_METAL = "ON"
 CFLAGS = "-Wno-elaborated-enum-base"
 CXXFLAGS = "-Wno-elaborated-enum-base"

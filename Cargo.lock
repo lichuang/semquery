@@ -3377,7 +3377,7 @@ dependencies = [
 
 [[package]]
 name = "semquery"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3402,7 +3402,7 @@ dependencies = [
 
 [[package]]
 name = "semquery-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3413,7 +3413,7 @@ dependencies = [
 
 [[package]]
 name = "semquery-indexer"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3439,7 +3439,7 @@ dependencies = [
 
 [[package]]
 name = "semquery-model"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "encoding_rs",
@@ -3456,7 +3456,7 @@ dependencies = [
 
 [[package]]
 name = "semquery-retrieve"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "log",
@@ -3472,7 +3472,7 @@ dependencies = [
 
 [[package]]
 name = "semquery-storage"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "log",
@@ -3484,7 +3484,7 @@ dependencies = [
 
 [[package]]
 name = "semquery-synth"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "log",
