@@ -1,4 +1,4 @@
-# docq 性能优化方向
+# semquery 性能优化方向
 
 > 基于当前代码结构梳理的索引、查询、问答及模型推理层的优化机会。先记录方向，后续再逐步落地。
 
@@ -49,7 +49,7 @@
 
 ---
 
-## 4. 模型推理层（docq-model）
+## 4. 模型推理层（semquery-model）
 
 | 问题 | 影响 | 优化思路 |
 |---|---|---|
@@ -57,13 +57,13 @@
 | `GgufLlm::complete` 每次调用都新建 `LlamaContext` | KV cache 被丢弃，context 创建本身也重 | 按模型缓存/池化 `LlamaContext`，调用间 reset |
 | 默认 CPU-only，没有 Metal/CUDA 控制 | GPU 机器性能没发挥 | 在 `LlmConfig` 暴露 `n_gpu_layers`、`n_threads`、`n_batch` |
 | LLM 没有 streaming | 首 token 延迟等于完整响应延迟 | 加 `complete_stream` 返回 token 流 |
-| `Engine` 每次 CLI 调用都重新构造 `ModelHub`、下载/加载模型 | 冷启动几秒 | 进程级模型缓存（按 spec path 缓存 `Arc<LlamaModel>`），或提供 `docq serve` 常驻模式 |
+| `Engine` 每次 CLI 调用都重新构造 `ModelHub`、下载/加载模型 | 冷启动几秒 | 进程级模型缓存（按 spec path 缓存 `Arc<LlamaModel>`），或提供 `semq serve` 常驻模式 |
 
 **快速 win**：Embedder/Reranker 的 Mutex 去掉或池化，能立即释放并行度。
 
 ---
 
-## 5. 存储层（docq-storage）
+## 5. 存储层（semquery-storage）
 
 | 问题 | 影响 | 优化思路 |
 |---|---|---|
@@ -82,7 +82,7 @@
 
 - **`tracing` 可观测性**：现在只有 `--verbose` 打印耗时，难定位真实瓶颈。给 embed、search、rerank、LLM decode、storage query 加 span，后续优化才有数据。
 - **错误类型太粗**：大量 `Other(String)`，没法区分可重试错误和致命错误，也限制了未来做重试/熔断。
-- **并发控制**：以后要是有 `docq serve` 或多 collection 索引，需要 `Semaphore` 限流，避免 burst 把内存/线程打满。
+- **并发控制**：以后要是有 `semq serve` 或多 collection 索引，需要 `Semaphore` 限流，避免 burst 把内存/线程打满。
 
 ---
 
@@ -93,7 +93,7 @@
 3. **模型层**：Embedder/Reranker 去 Mutex 或池化
 4. **问答**：上下文 token 预算 + 尾部截断
 5. **索引器**：流式读取、批量去重、减少重复 tokenize
-6. **长期**：`docq serve` 常驻模式 + 进程级模型缓存
+6. **长期**：`semq serve` 常驻模式 + 进程级模型缓存
 
 这些改动基本都在现有架构内，不需要破坏 crate 分层。
 
@@ -113,14 +113,14 @@
 
 ### 7.3 向量维度硬编码 512
 
-- **位置**：`docq-storage/src/sqlite.rs:196` `embedding FLOAT[512]`
+- **位置**：`semquery-storage/src/sqlite.rs:196` `embedding FLOAT[512]`
 - **现状**：schema 写死 `[512]`，但 `embedder.dimension()` 是动态的，且 `registry.rs` 已声明支持 `BGELargeZHV15`(1024) / `BGEM3`(1024)。
 - **影响**：用 1024 维模型建表后插入向量直接失败。
 - **建议**：`init()` 时根据 `embedder.dimension()` 建表，或在 config 中固定维度并在加载时校验。
 
 ### 7.4 错误类型全是 `Other(String)`，错误分类丢失
 
-- **位置**：`docq-core/src/error.rs` 全部子错误
+- **位置**：`semquery-core/src/error.rs` 全部子错误
 - **现状**：`ParseError` / `StoreError` / `EmbedError` / `RetrieveError` / `SynthError` / `LlmError` / `ModelError` 都只有一个 `Other(String)` 变体，`#[from]` 转换无处附着，分类是"假分类"。
 - **影响**：调用方无法按错误类型编程式处理（如区分"可重试的下载失败"与"致命配置错误"），限制了未来做重试/熔断。
 - **建议**：为每类补充 1-2 个真实变体（如 `StoreError::Io`、`ModelError::Download`、`LlmError::ContextOverflow`）。
@@ -131,7 +131,7 @@
 
 ### 7.6 `hub.ensure` 无条件写 `model_versions`
 
-- **位置**：`docq-model/src/hub.rs:20`
+- **位置**：`semquery-model/src/hub.rs:20`
 - **现状**：`ensure` 每次都 `begin_tx` + `set_model_version`，即使模型没变。
 - **影响**：每次加载模型都多一次事务写，且掩盖了 7.1 的对比逻辑缺失。
 - **建议**：先 `get_model_version` 对比，相同则跳过写。
@@ -146,6 +146,6 @@
 4. **模型层**：Embedder/Reranker 去 Mutex 或池化
 5. **问答**：上下文 token 预算 + 尾部截断
 6. **索引器**：流式读取、批量去重、减少重复 tokenize
-7. **长期**：`docq serve` 常驻模式 + 进程级模型缓存
+7. **长期**：`semq serve` 常驻模式 + 进程级模型缓存
 
 > 正确性缺陷（第 1 项）应优先于所有性能优化：它们会导致检索结果静默错误或直接崩溃，性能优化无法弥补。

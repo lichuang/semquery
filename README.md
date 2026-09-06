@@ -1,24 +1,24 @@
-# docq
+# semquery
 
 [![Rust](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 
 **Local-first search and answers for your documents.**
 
-`docq` (short for **document query**) is a local, offline-ready RAG tool written in Rust. It indexes your personal document collections and lets you search or ask questions with cited answers — everything stays on your machine: indexes, models, and queries.
+`semquery` (short for **semantic query**) is a local, offline-ready RAG tool written in Rust. It indexes your personal document collections and lets you search or ask questions with cited answers — everything stays on your machine: indexes, models, and queries.
 
-## ✨ What makes docq different
+## ✨ What makes semquery different
 
 - **Offline document search & Q&A engine** — Search passages or ask natural-language questions; everything runs locally with cited answers.
 - **Hybrid retrieval** — Combines BM25 keyword search, dense vector search, RRF fusion, and cross-encoder reranking.
 - **Single-file index** — Everything lives in one SQLite database (`sqlite-vec` + FTS5).
 - **Cited answers** — `ask` returns natural-language answers with inline `[N]` citations pointing back to source files.
 - **Chinese-optimized** — Sentence-level chunking and jieba word-level tokenization for BM25.
-- **Library-first workspace** — Core traits live in `docq-core`; heavy backends are isolated behind feature flags.
+- **Library-first workspace** — Core traits live in `semquery-core`; heavy backends are isolated behind feature flags.
 
 ## ⚖️ Comparison with other tools
 
-| Feature | docq | QMD | LlamaIndex | Chroma | Obsidian Smart Connections |
+| Feature | semquery | QMD | LlamaIndex | Chroma | Obsidian Smart Connections |
 |---|---|---|---|---|---|
 | Fully offline | ✅ | ✅ | ⚠️ (cloud optional) | ✅ | ❌ (uses OpenAI) |
 | Single-file index | ✅ SQLite | ⚠️ SQLite (project-local optional) | ❌ | ❌ | ❌ |
@@ -35,25 +35,25 @@
 
 ```bash
 # Install from source
-cargo install --path crates/docq
+cargo install --path crates/semquery
 
-# Create a workspace (uses ~/.config/docq by default)
-docq init
+# Create a workspace (uses ~/.config/semquery by default)
+semq init
 
 # Add a directory of documents
-docq add ~/notes --name notes
+semq add ~/notes --name notes
 
 # Build the index
-docq index
+semq index
 
 # Search for passages
-docq search "quarterly revenue"
+semq search "quarterly revenue"
 
 # Ask a question and get a cited answer
-docq ask "What was the revenue in Q2?"
+semq ask "What was the revenue in Q2?"
 ```
 
-Run `docq --help` and `docq <command> --help` to discover all options.
+Run `semq --help` and `semq <command> --help` to discover all options.
 
 ## 📚 Supported document formats
 
@@ -65,36 +65,36 @@ You can disable optional format support at build time with `--no-default-feature
 
 ## 🧪 Try it with bundled test data
 
-The repository includes sample documents under `testdata/` (excerpts from the public tutorial **Distributed System Illustrated** by [codedump.info](https://www.codedump.info/dist-system-en/?ref=docq)). Try it without preparing your own files:
+The repository includes sample documents under `testdata/` (excerpts from the public tutorial **Distributed System Illustrated** by [codedump.info](https://www.codedump.info/dist-system-en/?ref=semquery)). Try it without preparing your own files:
 
 ```bash
-docq init
-docq add testdata/ --name notes
-docq index
+semq init
+semq add testdata/ --name notes
+semq index
 
 # Search
-docq search "Multi-Paxos improvements"
+semq search "Multi-Paxos improvements"
 
 # Ask with citations
-docq ask "What are the improvements of Multi-Paxos over the Paxos algorithm?"
+semq ask "What are the improvements of Multi-Paxos over the Paxos algorithm?"
 
 # See step-by-step timing
- docq ask "What are the improvements of Multi-Paxos over the Paxos algorithm?" -v
+ semq ask "What are the improvements of Multi-Paxos over the Paxos algorithm?" -v
 ```
 
 It also works in Chinese:
 
 ```bash
-docq ask "multi paxos 相比 paxos 算法的改进点？"
+semq ask "multi paxos 相比 paxos 算法的改进点？"
 ```
 
 ## 🏗️ Architecture
 
 ```
-        cli (docq)
+        cli (semq)
          │
          ▼
-    docq (Engine facade)
+    semquery (Engine facade)
    ╱    │         ╲
 retrieve  index   synthesize
   │       │          │
@@ -104,13 +104,13 @@ storage + model backends
         core
 ```
 
-- **`docq-core`** — Shared types, traits, and errors. Zero heavy dependencies.
-- **`docq-storage`** — SQLite implementation of the `Storage` trait (`sqlite-vec`, FTS5).
-- **`docq-indexer`** — File reading, chunking, and incremental indexing.
-- **`docq-retrieve`** — BM25 + vector recall → RRF → rerank.
-- **`docq-model`** — Local model backends: FastEmbed (embed/rerank) and llama.cpp (LLM).
-- **`docq-synth`** — Prompt building, LLM completion, and citation parsing.
-- **`docq`** — CLI and `Engine` facade.
+- **`semquery-core`** — Shared types, traits, and errors. Zero heavy dependencies.
+- **`semquery-storage`** — SQLite implementation of the `Storage` trait (`sqlite-vec`, FTS5).
+- **`semquery-indexer`** — File reading, chunking, and incremental indexing.
+- **`semquery-retrieve`** — BM25 + vector recall → RRF → rerank.
+- **`semquery-model`** — Local model backends: FastEmbed (embed/rerank) and llama.cpp (LLM).
+- **`semquery-synth`** — Prompt building, LLM completion, and citation parsing.
+- **`semquery`** — CLI and `Engine` facade.
 
 ## 🛠️ Global options
 
@@ -123,9 +123,9 @@ Every command accepts these flags:
 Examples:
 
 ```bash
-docq --workspace ./project-kb init
-docq --workspace ./project-kb --config ./project-kb/docq.toml add ./docs --name docs
-docq --workspace ./project-kb search "deployment checklist" --json
+semq --workspace ./project-kb init
+semq --workspace ./project-kb --config ./project-kb/semquery.toml add ./docs --name docs
+semq --workspace ./project-kb search "deployment checklist" --json
 ```
 
 ## 📤 Output formats
@@ -133,29 +133,29 @@ docq --workspace ./project-kb search "deployment checklist" --json
 `search`, `ask`, and `status` support `--json` for machine-readable output:
 
 ```bash
-docq search "budget approval" --json
-docq ask "Who approved the budget?" --json
-docq status --json
+semq search "budget approval" --json
+semq ask "Who approved the budget?" --json
+semq status --json
 ```
 
 Use `--explain` with `search` to see the score breakdown:
 
 ```bash
-docq search "budget approval" --explain
+semq search "budget approval" --explain
 ```
 
 ## ⚙️ Configuration
 
 The global configuration file is created automatically on first run:
 
-- macOS / Linux: `~/.config/docq/config.toml`
-- Windows: `%LOCALAPPDATA%\docq\config.toml`
+- macOS / Linux: `~/.config/semquery/config.toml`
+- Windows: `%LOCALAPPDATA%\semquery\config.toml`
 
 Override it with `--config`.
 
 ## 📥 First-use downloads
 
-The first time you index, search, or ask, `docq` downloads the required local models to `--model-cache` (`~/.cache/docq/models` by default). After that, everything works offline.
+The first time you index, search, or ask, `semquery` downloads the required local models to `--model-cache` (`~/.cache/semquery/models` by default). After that, everything works offline.
 
 ## 🎮 GPU acceleration
 
@@ -166,7 +166,7 @@ The prebuilt binary uses the CPU backend. On macOS (Apple Silicon), Metal GPU ac
 Install the [Vulkan SDK](https://vulkan.lunarg.com/), then:
 
 ```bash
-cargo install docq --features llama-cpp-2/vulkan
+cargo install semquery --features llama-cpp-2/vulkan
 ```
 
 ### CUDA (Linux / Windows — NVIDIA only)
@@ -174,10 +174,10 @@ cargo install docq --features llama-cpp-2/vulkan
 Install the [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit), then:
 
 ```bash
-cargo install docq --features llama-cpp-2/cuda
+cargo install semquery --features llama-cpp-2/cuda
 ```
 
-If no GPU is available at runtime, `docq` automatically falls back to CPU.
+If no GPU is available at runtime, `semquery` automatically falls back to CPU.
 
 ## 🗺️ Roadmap
 
@@ -185,7 +185,7 @@ If no GPU is available at runtime, `docq` automatically falls back to CPU.
 - [ ] LLM query expansion for hybrid retrieval
 - [ ] xlsx / csv indexing
 - [ ] File-watcher auto-indexing
-- [ ] `docq model` subcommand for model management
+- [ ] `semquery model` subcommand for model management
 - [ ] Customizable output formats (e.g. JSON, CSV, Markdown)
 - [ ] Cited answers with source snippets and referenced content
 - [ ] Prebuilt release binaries

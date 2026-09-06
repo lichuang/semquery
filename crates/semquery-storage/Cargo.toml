@@ -1,0 +1,19 @@
+[package]
+name = "semquery-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "SQLite-backed storage implementation for semquery."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/lichuang/semquery"
+readme = "../../README.md"
+keywords = ["rag", "sqlite", "storage", "vectors"]
+categories = ["database"]
+
+[dependencies]
+semquery-core = { workspace = true }
+thiserror = { workspace = true }
+rusqlite = { workspace = true }
+sqlite-vec = { workspace = true }
+chrono = { workspace = true }
+log = { workspace = true }

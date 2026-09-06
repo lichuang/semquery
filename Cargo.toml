@@ -1,13 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/docq-core",
-    "crates/docq-model",
-    "crates/docq-indexer",
-    "crates/docq-storage",
-    "crates/docq-retrieve",
-    "crates/docq-synth",
-    "crates/docq",
+    "crates/semquery-core",
+    "crates/semquery-model",
+    "crates/semquery-indexer",
+    "crates/semquery-storage",
+    "crates/semquery-retrieve",
+    "crates/semquery-synth",
+    "crates/semquery",
 ]
 
 [workspace.package]
@@ -47,12 +47,12 @@ zip = "2"
 quick-xml = "0.37"
 tempfile = "3"
 lopdf = "0.42"
-docq-core = { path = "crates/docq-core", version = "0.2.0" }
-docq-model = { path = "crates/docq-model", version = "0.2.0" }
-docq-indexer = { path = "crates/docq-indexer", version = "0.2.0" }
-docq-storage = { path = "crates/docq-storage", version = "0.2.0" }
-docq-retrieve = { path = "crates/docq-retrieve", version = "0.2.0" }
-docq-synth = { path = "crates/docq-synth", version = "0.2.0" }
+semquery-core = { path = "crates/semquery-core", version = "0.2.0" }
+semquery-model = { path = "crates/semquery-model", version = "0.2.0" }
+semquery-indexer = { path = "crates/semquery-indexer", version = "0.2.0" }
+semquery-storage = { path = "crates/semquery-storage", version = "0.2.0" }
+semquery-retrieve = { path = "crates/semquery-retrieve", version = "0.2.0" }
+semquery-synth = { path = "crates/semquery-synth", version = "0.2.0" }
 
 # esaxx-rs 0.1.10 unconditionally forces /MT on Windows, which conflicts with
 # other C/C++ dependencies (e.g. llama.cpp) that use /MD. Vendor a patched copy

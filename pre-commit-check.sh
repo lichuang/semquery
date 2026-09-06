@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# docq pre-commit check script
+# semquery pre-commit check script
 # Usage: ./pre-commit-check.sh
 #
 # Runs the full set of checks required before committing (see AGENTS.md):

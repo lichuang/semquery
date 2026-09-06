@@ -940,130 +940,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "docq"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "clap",
- "dirs 5.0.1",
- "docq-core",
- "docq-indexer",
- "docq-model",
- "docq-retrieve",
- "docq-storage",
- "docq-synth",
- "flexi_logger",
- "log",
- "serde",
- "serde_json",
- "tempfile",
- "tokenizers 0.20.4",
- "tokio",
- "tokio-stream",
- "toml",
-]
-
-[[package]]
-name = "docq-core"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "chrono",
- "log",
- "serde",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "docq-indexer"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "chrono",
- "docq-core",
- "docq-model",
- "docq-storage",
- "glob",
- "jieba-rs",
- "log",
- "lopdf",
- "pdf-extract",
- "quick-xml",
- "rayon",
- "sha2",
- "tempfile",
- "thiserror 1.0.69",
- "tokenizers 0.20.4",
- "tokio",
- "tokio-stream",
- "walkdir",
- "zip",
-]
-
-[[package]]
-name = "docq-model"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "docq-core",
- "docq-storage",
- "encoding_rs",
- "fastembed",
- "hf-hub 0.3.2",
- "llama-cpp-2",
- "log",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
-name = "docq-retrieve"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "docq-core",
- "docq-indexer",
- "docq-model",
- "docq-storage",
- "log",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-stream",
-]
-
-[[package]]
-name = "docq-storage"
-version = "0.2.0"
-dependencies = [
- "chrono",
- "docq-core",
- "log",
- "rusqlite",
- "sqlite-vec",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "docq-synth"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "docq-core",
- "docq-indexer",
- "docq-model",
- "docq-retrieve",
- "docq-storage",
- "log",
- "regex",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3497,6 +3373,130 @@ checksum = "6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3"
 dependencies = [
  "core-foundation-sys",
  "libc",
+]
+
+[[package]]
+name = "semquery"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "dirs 5.0.1",
+ "flexi_logger",
+ "log",
+ "semquery-core",
+ "semquery-indexer",
+ "semquery-model",
+ "semquery-retrieve",
+ "semquery-storage",
+ "semquery-synth",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokenizers 0.20.4",
+ "tokio",
+ "tokio-stream",
+ "toml",
+]
+
+[[package]]
+name = "semquery-core"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "log",
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "semquery-indexer"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "glob",
+ "jieba-rs",
+ "log",
+ "lopdf",
+ "pdf-extract",
+ "quick-xml",
+ "rayon",
+ "semquery-core",
+ "semquery-model",
+ "semquery-storage",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokenizers 0.20.4",
+ "tokio",
+ "tokio-stream",
+ "walkdir",
+ "zip",
+]
+
+[[package]]
+name = "semquery-model"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "encoding_rs",
+ "fastembed",
+ "hf-hub 0.3.2",
+ "llama-cpp-2",
+ "log",
+ "semquery-core",
+ "semquery-storage",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "semquery-retrieve"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "log",
+ "semquery-core",
+ "semquery-indexer",
+ "semquery-model",
+ "semquery-storage",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
+name = "semquery-storage"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "log",
+ "rusqlite",
+ "semquery-core",
+ "sqlite-vec",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "semquery-synth"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "log",
+ "regex",
+ "semquery-core",
+ "semquery-indexer",
+ "semquery-model",
+ "semquery-retrieve",
+ "semquery-storage",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]

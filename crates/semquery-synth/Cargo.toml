@@ -1,0 +1,26 @@
+[package]
+name = "semquery-synth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Citation-grounded answer synthesis for semquery."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/lichuang/semquery"
+readme = "../../README.md"
+keywords = ["rag", "llm", "synthesis", "citations"]
+categories = ["algorithms", "text-processing"]
+
+[dependencies]
+semquery-core = { workspace = true }
+semquery-model = { workspace = true, features = ["llm"] }
+semquery-retrieve = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+regex = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+semquery-indexer = { workspace = true }
+semquery-storage = { workspace = true }
+tempfile = { workspace = true }

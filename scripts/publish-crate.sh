@@ -3,22 +3,22 @@
 # differs from the version already published.
 #
 # Usage:
-#   scripts/publish-crate.sh docq-core
-#   scripts/publish-crate.sh docq-model --dry-run
-#   scripts/publish-crate.sh docq --allow-dirty
+#   scripts/publish-crate.sh semquery-core
+#   scripts/publish-crate.sh semquery-model --dry-run
+#   scripts/publish-crate.sh semquery --allow-dirty
 #
 # Dependency order for the first release (publish from bottom to top).
 # Dev-dependencies are also resolved from crates.io during publish, so they
 # must be published before the crate that references them.
 #
-#   1. docq-core
-#   2. docq-storage        (dev-dependency of docq-model)
-#   3. docq-model          (depends on docq-core; dev-depends on docq-storage)
-#   4. docq-indexer        (depends on docq-core, docq-model, docq-storage)
-#   5. docq-retrieve       (depends on docq-core, docq-model, docq-storage)
-#   6. docq-synth          (depends on docq-core, docq-model, docq-retrieve;
-#                         dev-depends on docq-indexer, docq-storage)
-#   7. docq                (depends on all of the above)
+#   1. semquery-core
+#   2. semquery-storage        (dev-dependency of semquery-model)
+#   3. semquery-model          (depends on semquery-core; dev-depends on semquery-storage)
+#   4. semquery-indexer        (depends on semquery-core, semquery-model, semquery-storage)
+#   5. semquery-retrieve       (depends on semquery-core, semquery-model, semquery-storage)
+#   6. semquery-synth          (depends on semquery-core, semquery-model, semquery-retrieve;
+#                         dev-depends on semquery-indexer, semquery-storage)
+#   7. semquery                (depends on all of the above)
 
 set -euo pipefail
 
@@ -81,7 +81,7 @@ echo "crate:  $CRATE"
 echo "local:  $LOCAL_VERSION"
 
 REMOTE_VERSION=$(curl -sS \
-  -H "User-Agent: docq-publish-script" \
+  -H "User-Agent: semquery-publish-script" \
   "https://crates.io/api/v1/crates/$CRATE" 2>/dev/null \
   | jq -r '.crate.max_version // empty' 2>/dev/null || true)
 
