@@ -29,6 +29,14 @@ pub trait Reranker: Send + Sync {
 #[async_trait]
 pub trait Llm: Send + Sync {
   async fn complete(&self, prompt: &str) -> Result<String>;
+
+  /// Streamed generation: calls `on_token` for each decoded piece as it is
+  /// produced, and returns the full text when generation ends.
+  async fn complete_stream(&self, prompt: &str, on_token: &mut (dyn FnMut(String) + Send + Sync)) -> Result<String> {
+    let text = self.complete(prompt).await?;
+    on_token(text.clone());
+    Ok(text)
+  }
 }
 
 pub trait Chunker: Send + Sync {

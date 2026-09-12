@@ -155,6 +155,86 @@ impl Llm for GgufLlm {
 
     Ok(output)
   }
+
+  async fn complete_stream(&self, prompt: &str, on_token: &mut (dyn FnMut(String) + Send + Sync)) -> Result<String> {
+    let messages = [
+      LlamaChatMessage::new("system".into(), self.config.system_prompt.clone())
+        .map_err(|e| LlmError::InferenceFailed(e.to_string()))?,
+      LlamaChatMessage::new("user".into(), prompt.to_string()).map_err(|e| LlmError::InferenceFailed(e.to_string()))?,
+    ];
+
+    let formatted = self
+      .model
+      .apply_chat_template(&self.chat_template, &messages, true)
+      .map_err(|e| LlmError::InferenceFailed(e.to_string()))?;
+
+    let tokens = self
+      .model
+      .str_to_token(&formatted, AddBos::Always)
+      .map_err(|e| LlmError::InferenceFailed(e.to_string()))?;
+
+    let ctx_params = LlamaContextParams::default()
+      .with_n_ctx(NonZeroU32::new(self.config.n_ctx))
+      .with_n_batch(self.config.n_ctx);
+    let mut ctx = self
+      .model
+      .new_context(&self.backend, ctx_params)
+      .map_err(|e| LlmError::InferenceFailed(e.to_string()))?;
+
+    // Reserve room for the generated answer so we do not overflow the KV cache.
+    let max_prompt_tokens = (self.config.n_ctx as usize).saturating_sub(self.config.max_tokens).max(1);
+    let prompt_tokens = if tokens.len() > max_prompt_tokens {
+      eprintln!(
+        "[semquery] warning: prompt is {} tokens but context budget is {}; truncating from the beginning",
+        tokens.len(),
+        max_prompt_tokens
+      );
+      &tokens[tokens.len() - max_prompt_tokens..]
+    } else {
+      &tokens[..]
+    };
+
+    let mut batch = LlamaBatch::new(prompt_tokens.len() + self.config.max_tokens, 1);
+    for (i, token) in prompt_tokens.iter().enumerate() {
+      batch
+        .add(*token, i as i32, &[0], i == prompt_tokens.len() - 1)
+        .map_err(|e| LlmError::InferenceFailed(e.to_string()))?;
+    }
+
+    ctx.decode(&mut batch).map_err(|e| LlmError::InferenceFailed(e.to_string()))?;
+
+    let mut sampler = LlamaSampler::chain_simple([
+      LlamaSampler::temp(self.config.temperature),
+      LlamaSampler::top_p(self.config.top_p, 1),
+      LlamaSampler::dist(self.config.seed),
+    ]);
+
+    let mut output = String::new();
+    let mut decoder = UTF_8.new_decoder();
+
+    for step in 0..self.config.max_tokens {
+      let pos = prompt_tokens.len() as i32 + step as i32;
+      let token = sampler.sample(&ctx, batch.n_tokens() - 1);
+
+      if self.model.is_eog_token(token) {
+        break;
+      }
+
+      let piece = self
+        .model
+        .token_to_piece(token, &mut decoder, true, None)
+        .map_err(|e| LlmError::InferenceFailed(e.to_string()))?;
+      output.push_str(&piece);
+      on_token(piece.to_string());
+
+      batch.clear();
+      batch.add(token, pos, &[0], true).map_err(|e| LlmError::InferenceFailed(e.to_string()))?;
+
+      ctx.decode(&mut batch).map_err(|e| LlmError::InferenceFailed(e.to_string()))?;
+    }
+
+    Ok(output)
+  }
 }
 
 #[cfg(test)]

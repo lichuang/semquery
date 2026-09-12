@@ -439,16 +439,48 @@ async fn run_ask(
   query: &str,
   json: bool,
 ) -> anyhow::Result<()> {
+  use tokio_stream::StreamExt;
+
   let engine = Engine::open_for_ask(engine_config(workspace, model_cache, config, verbose)).await?;
-  let answer = engine.ask(query).await?;
+  let mut stream = std::pin::pin!(engine.ask_stream(query)?);
+
+  let mut buffered_text = String::new();
+  let mut answer: Option<semquery_core::Answer> = None;
+
+  while let Some(event) = stream.as_mut().next().await {
+    match event? {
+      semquery_core::AskEvent::Token { delta } => {
+        if !json {
+          print!("{delta}");
+          use std::io::Write;
+          std::io::stdout().flush().ok();
+        }
+        buffered_text.push_str(&delta);
+      }
+      semquery_core::AskEvent::AnswerComplete { answer: a, .. } => {
+        answer = Some(a);
+      }
+      _ => {}
+    }
+  }
 
   if json {
-    print_json(&answer);
+    match answer {
+      Some(a) => print_json(&a),
+      None => {
+        print_json(&semquery_core::Answer {
+          text: buffered_text,
+          citations: Vec::new(),
+        });
+      }
+    }
   } else {
-    println!("{}", answer.text);
-    if !answer.citations.is_empty() {
+    println!();
+    if let Some(a) = answer
+      && !a.citations.is_empty()
+    {
       println!("\nSources:");
-      for c in &answer.citations {
+      for c in &a.citations {
         println!("  {} {}", c.marker, c.source);
       }
     }

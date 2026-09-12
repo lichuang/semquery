@@ -3487,6 +3487,8 @@ name = "semquery-synth"
 version = "0.3.0"
 dependencies = [
  "async-trait",
+ "futures-core",
+ "futures-util",
  "log",
  "regex",
  "semquery-core",
@@ -3497,6 +3499,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-stream",
 ]
 
 [[package]]

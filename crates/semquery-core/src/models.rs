@@ -97,6 +97,32 @@ pub enum SearchEvent {
   Completed { hits: Vec<SearchHit>, stats: SearchStats },
 }
 
+/// Aggregated timings of one ask run, in milliseconds.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AskStats {
+  pub total_ms: u64,
+  pub retrieve_ms: u64,
+  pub prompt_ms: u64,
+  pub llm_ms: u64,
+}
+
+/// Streaming events emitted by the ask pipeline, in order.
+/// The stream ends after `AnswerComplete` or when the underlying future returns Err.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AskEvent {
+  /// A pipeline stage started — for progress display.
+  StageStarted { stage: SearchStage },
+  /// A pipeline stage finished — carries the stage duration.
+  StageFinished { stage: SearchStage, elapsed_ms: u64 },
+  /// Retrieval finished: the context set that grounds the answer.
+  Hits { hits: Vec<SearchHit> },
+  /// A streamed piece of LLM output (one token or a multi-token delta).
+  Token { delta: String },
+  /// Terminal event: the full answer with citations, plus timings.
+  AnswerComplete { answer: Answer, stats: AskStats },
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScoreExplain {
   pub bm25_score: Option<f32>,

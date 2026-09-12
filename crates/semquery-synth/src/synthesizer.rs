@@ -1,11 +1,18 @@
 //! Citation-grounded answer synthesis over retrieved passages.
 
 use std::sync::Arc;
+use std::time::Instant;
 
-use semquery_core::{Answer, Citation, Llm, Result, Verbose};
+use futures_core::Stream;
+use semquery_core::{Answer, AskEvent, Citation, DocqError, Llm, Result, SearchEvent, Verbose};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::citation::parse_citations;
 use crate::prompt::build_ask_prompt;
+
+type AskEventItem = std::result::Result<AskEvent, DocqError>;
+type AskEventSender = mpsc::Sender<AskEventItem>;
 
 pub struct SynthesizerConfig {
   pub retriever: Arc<semquery_retrieve::Retriever>,
@@ -13,6 +20,7 @@ pub struct SynthesizerConfig {
   pub verbose: Verbose,
 }
 
+#[derive(Clone)]
 pub struct Synthesizer {
   retriever: Arc<semquery_retrieve::Retriever>,
   llm: Arc<dyn Llm>,
@@ -94,6 +102,123 @@ impl Synthesizer {
       .collect();
 
     Ok(Answer { text: raw, citations })
+  }
+
+  /// Streaming variant of [`Synthesizer::ask`].
+  ///
+  /// Runs the pipeline in an independent task: emits retrieval stage events,
+  /// then streams each LLM token as it is decoded, and terminates with an
+  /// `AnswerComplete` event carrying the full answer plus timings. Dropping
+  /// the stream cancels the pipeline.
+  pub fn ask_stream(&self, query: impl Into<String>) -> impl Stream<Item = AskEventItem> + Send + 'static {
+    let (tx, rx) = mpsc::channel::<AskEventItem>(32);
+    let this = <Self as Clone>::clone(self);
+    let query = query.into();
+
+    tokio::spawn(async move {
+      if let Err(e) = this.ask_internal(&query, &tx).await {
+        let _ = tx.send(Err(e)).await;
+      }
+    });
+
+    ReceiverStream::new(rx)
+  }
+
+  async fn ask_internal(&self, query: &str, tx: &AskEventSender) -> Result<()> {
+    use tokio_stream::StreamExt;
+
+    let total_start = Instant::now();
+    let mut stats = semquery_core::AskStats::default();
+
+    let _total = self.verbose.start("ask");
+
+    // ---- Retrieve the grounding chunks, forwarding fine-grained stage events ----
+    let mut search = std::pin::pin!(Arc::clone(&self.retriever).search_stream(query, 5));
+    let mut hits: Vec<semquery_core::SearchHit> = Vec::new();
+    while let Some(event) = search.as_mut().next().await {
+      match event? {
+        SearchEvent::StageStarted { stage } => {
+          if tx.send(Ok(AskEvent::StageStarted { stage })).await.is_err() {
+            return Ok(());
+          }
+        }
+        SearchEvent::StageFinished { stage, elapsed_ms } => {
+          if tx.send(Ok(AskEvent::StageFinished { stage, elapsed_ms })).await.is_err() {
+            return Ok(());
+          }
+        }
+        SearchEvent::Completed {
+          hits: grounded,
+          stats: search_stats,
+        } => {
+          stats.retrieve_ms = search_stats.total_ms;
+          hits = grounded;
+        }
+      }
+    }
+    if tx.send(Ok(AskEvent::Hits { hits: hits.clone() })).await.is_err() {
+      return Ok(());
+    }
+    if hits.is_empty() {
+      stats.total_ms = total_start.elapsed().as_millis() as u64;
+      let _ = tx
+        .send(Ok(AskEvent::AnswerComplete {
+          answer: Answer {
+            text: String::new(),
+            citations: Vec::new(),
+          },
+          stats,
+        }))
+        .await;
+      return Ok(());
+    }
+
+    // ---- Build the prompt ----
+    let prompt_start = Instant::now();
+    let valid_markers: Vec<String> = hits.iter().enumerate().map(|(i, _)| format!("[{}]", i + 1)).collect();
+    let prompt = build_ask_prompt(query, &hits);
+    stats.prompt_ms = prompt_start.elapsed().as_millis() as u64;
+
+    // ---- Generate the answer, streaming each token ----
+    // The sync token callback uses `try_send`: sending a progress token into a
+    // full channel drops that event rather than blocking the decode loop —
+    // the full text still arrives with the terminal `AnswerComplete`.
+    let llm_start = Instant::now();
+    let prompt = prompt.to_string();
+    let mut on_token = |piece: String| {
+      let _ = tx.try_send(Ok(AskEvent::Token { delta: piece }));
+    };
+    let raw = self.llm.complete_stream(&prompt, &mut on_token).await?;
+    stats.llm_ms = llm_start.elapsed().as_millis() as u64;
+
+    // ---- Parse and validate citations, back-fill sources ----
+    let valid = parse_citations(&raw, &valid_markers);
+    let citations: Vec<Citation> = valid
+      .into_iter()
+      .filter_map(|marker| {
+        let num: usize = marker.trim_start_matches('[').trim_end_matches(']').parse().ok()?;
+        let hit = hits.get(num.checked_sub(1)?)?;
+        let chunk = &hit.chunk;
+        Some(Citation {
+          marker,
+          source: format!(
+            "{} (bytes {}-{})",
+            hit.file_path.display(),
+            chunk.byte_range.start,
+            chunk.byte_range.end
+          ),
+        })
+      })
+      .collect();
+
+    stats.total_ms = total_start.elapsed().as_millis() as u64;
+    let _ = tx
+      .send(Ok(AskEvent::AnswerComplete {
+        answer: Answer { text: raw, citations },
+        stats,
+      }))
+      .await;
+    Ok(())
   }
 }
 
@@ -275,5 +400,49 @@ mod tests {
     let answer = synth.ask("nothing matches here").await.unwrap();
     assert!(answer.text.is_empty());
     assert!(answer.citations.is_empty());
+  }
+
+  #[tokio::test]
+  async fn test_ask_stream_events() {
+    let storage = Arc::new(test_storage());
+    seed_index(
+      &storage,
+      &[("a.txt", "定价方案选坐席制"), ("b.txt", "访谈发现团队按人头预算")],
+    )
+    .await;
+
+    let retriever = test_retriever(&storage);
+    let llm = StubLlm {
+      response: "选坐席制是因为 [1]，访谈发现 [2]。".into(),
+    };
+
+    let synth = Synthesizer::new(SynthesizerConfig {
+      retriever: Arc::new(retriever),
+      llm: Arc::new(llm),
+      verbose: Verbose(false),
+    });
+
+    let mut events: Vec<AskEvent> = Vec::new();
+    {
+      use tokio_stream::StreamExt;
+      let mut stream = std::pin::pin!(synth.ask_stream("定价方案"));
+      while let Some(event) = stream.as_mut().next().await {
+        events.push(event.expect("stream must not error"));
+      }
+    }
+
+    // Terminal event must be AnswerComplete with the full answer.
+    let Some(AskEvent::AnswerComplete { answer, .. }) = events.last() else {
+      panic!("last event must be AnswerComplete");
+    };
+    assert!(!answer.text.is_empty());
+    assert_eq!(answer.citations.len(), 2);
+
+    // A Token event must carry the streamed LLM output.
+    let tokens: Vec<&AskEvent> = events.iter().filter(|e| matches!(e, AskEvent::Token { .. })).collect();
+    assert!(!tokens.is_empty(), "at least one Token event expected");
+
+    // A Hits event must carry the grounding context before tokens arrive.
+    assert!(events.iter().any(|e| matches!(e, AskEvent::Hits { hits } if !hits.is_empty())));
   }
 }

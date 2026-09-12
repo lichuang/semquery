@@ -379,6 +379,17 @@ impl Engine {
     synth.ask(query).await
   }
 
+  /// Streaming variant of [`Engine::ask`]: retrieval stage events, then each
+  /// LLM token as it is decoded, terminated by `AnswerComplete`.
+  pub fn ask_stream(
+    &self,
+    query: impl Into<String>,
+  ) -> Result<impl Stream<Item = std::result::Result<semquery_core::AskEvent, semquery_core::DocqError>> + Send + 'static>
+  {
+    let synth = self.synthesizer.as_ref().ok_or(semquery_core::LlmError::NotLoaded)?;
+    Ok(synth.ask_stream(query))
+  }
+
   pub fn status(&self) -> Result<EngineStatus> {
     let docs = self.storage.list_documents()?;
     let collections = self.storage.list_collections()?;
