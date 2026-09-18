@@ -148,4 +148,10 @@ pub enum ModelError {
 
   #[error("task join: {0}")]
   TaskJoin(String),
+
+  #[error("{component} not loaded — use {opener}")]
+  NotLoaded {
+    component: &'static str,
+    opener: &'static str,
+  },
 }

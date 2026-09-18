@@ -50,8 +50,8 @@ pub struct EngineComponents {
 
 pub struct Engine {
   storage: Arc<dyn Storage>,
-  indexer: Indexer,
-  retriever: Arc<Retriever>,
+  indexer: Option<Indexer>,
+  retriever: Option<Arc<Retriever>>,
   synthesizer: Option<Synthesizer>,
   verbose: Verbose,
 }
@@ -107,8 +107,8 @@ impl Engine {
 
     Self {
       storage,
-      indexer,
-      retriever,
+      indexer: Some(indexer),
+      retriever: Some(retriever),
       synthesizer,
       verbose,
     }
@@ -215,6 +215,23 @@ impl Engine {
   pub async fn open_for_ask(config: EngineConfig) -> Result<Self> {
     let (components, _) = Self::build_ask_components(&config).await?;
     Ok(Self::new(components))
+  }
+
+  /// Open for storage-level operations only: no models are loaded, no network
+  /// access, no model-cache resolution. Supports `status`, `list_collections`,
+  /// `add_collection`, `remove_collection`, etc. Model-backed operations
+  /// (`index`, `search`, `ask`) return a `ModelError::NotLoaded` error until the
+  /// engine is reopened with `open_for_index` / `open_for_search` / `open_for_ask`.
+  pub fn open_data_only(config: EngineConfig) -> Result<Self> {
+    let storage = Self::open_storage(&config.workspace_path)?;
+    storage.init(0)?;
+    Ok(Self {
+      storage,
+      indexer: None,
+      retriever: None,
+      synthesizer: None,
+      verbose: config.verbose,
+    })
   }
 
   async fn build_index_components(engine_config: &EngineConfig) -> Result<(EngineComponents, ModelHub)> {
@@ -340,10 +357,13 @@ impl Engine {
   }
 
   pub fn index_stream(&self) -> Result<impl Stream<Item = Result<IndexEvent>> + Send + 'static> {
+    let indexer = self.indexer.as_ref().ok_or(semquery_core::ModelError::NotLoaded {
+      component: "indexer",
+      opener: "open_for_index",
+    })?;
     let collections = self.storage.list_collections()?;
     let sources = collections.into_iter().map(|c| (c.name, c.path)).collect();
-    let indexer = self.indexer.clone();
-    Ok(indexer.index_sources_stream(sources))
+    Ok(indexer.clone().index_sources_stream(sources))
   }
 
   pub async fn index_one(&self, name: &str) -> Result<IndexStats> {
@@ -356,22 +376,33 @@ impl Engine {
     name: impl Into<String>,
   ) -> Result<impl Stream<Item = Result<IndexEvent>> + Send + 'static> {
     let name = name.into();
+    let indexer = self.indexer.as_ref().ok_or(semquery_core::ModelError::NotLoaded {
+      component: "indexer",
+      opener: "open_for_index",
+    })?;
     let collections = self.storage.list_collections()?;
     let col = collections.into_iter().find(|c| c.name == name).ok_or(semquery_core::StoreError::NotFound(name))?;
-    let indexer = self.indexer.clone();
-    Ok(indexer.index_sources_stream(vec![(col.name, col.path)]))
+    Ok(indexer.clone().index_sources_stream(vec![(col.name, col.path)]))
   }
 
   pub async fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>> {
-    self.retriever.search(query, top_k).await
+    let retriever = self.retriever.as_ref().ok_or(semquery_core::ModelError::NotLoaded {
+      component: "retriever",
+      opener: "open_for_search",
+    })?;
+    retriever.search(query, top_k).await
   }
 
   pub fn search_stream(
     &self,
     query: impl Into<String>,
     top_k: usize,
-  ) -> impl Stream<Item = Result<SearchEvent>> + Send + 'static {
-    self.retriever.clone().search_stream(query, top_k)
+  ) -> Result<impl Stream<Item = Result<SearchEvent>> + Send + 'static> {
+    let retriever = self.retriever.as_ref().ok_or(semquery_core::ModelError::NotLoaded {
+      component: "retriever",
+      opener: "open_for_search",
+    })?;
+    Ok(retriever.clone().search_stream(query, top_k))
   }
 
   pub async fn ask(&self, query: &str) -> Result<semquery_core::Answer> {
@@ -552,7 +583,7 @@ mod tests {
     let stats = engine.index().await.unwrap();
     assert!(stats.chunks_indexed > 0);
 
-    let mut stream = engine.search_stream("生日", 5);
+    let mut stream = engine.search_stream("生日", 5).unwrap();
     let mut completed_hits = Vec::new();
     while let Some(event) = stream.next().await {
       match event.unwrap() {
@@ -627,6 +658,101 @@ mod tests {
 
     let answer = engine.ask("定价方案").await.unwrap();
     assert!(!answer.text.is_empty());
+  }
+
+  #[tokio::test]
+  async fn test_open_data_only_loads_no_models() {
+    let tmp = TempDir::new().unwrap();
+    let config = EngineConfig {
+      workspace_path: tmp.path().to_path_buf(),
+      model_cache_dir: tmp.path().join("models"),
+      config: crate::config::DocqConfig::default(),
+      verbose: Verbose(false),
+    };
+    let engine = Engine::open_data_only(config).unwrap();
+
+    // Storage-level operations work without any model.
+    let notes_dir = TempDir::new().unwrap();
+    engine.add_collection("notes", notes_dir.path()).unwrap();
+    let status = engine.status().unwrap();
+    assert_eq!(status.collections.len(), 1);
+    assert_eq!(status.collections[0].name, "notes");
+
+    // Model-backed operations fail with a clear NotLoaded error.
+    assert!(engine.index().await.is_err());
+    assert!(engine.search("生日", 5).await.is_err());
+    assert!(engine.search_stream("生日", 5).is_err());
+    assert!(engine.ask("生日").await.is_err());
+    assert!(engine.ask_stream("生日").is_err());
+  }
+
+  #[tokio::test]
+  async fn test_data_only_then_reopen_with_models() {
+    let tmp = TempDir::new().unwrap();
+
+    // Phase 1: data-only open — manages collections without any model.
+    {
+      let engine = Engine::open_data_only(EngineConfig {
+        workspace_path: tmp.path().to_path_buf(),
+        model_cache_dir: tmp.path().join("models"),
+        config: crate::config::DocqConfig::default(),
+        verbose: Verbose(false),
+      })
+      .unwrap();
+      let notes_dir = TempDir::new().unwrap();
+      engine.add_collection("notes", notes_dir.path()).unwrap();
+      assert_eq!(engine.status().unwrap().collections.len(), 1);
+    }
+
+    // Phase 2: reopen the same workspace for model-backed use. This mirrors
+    // what open_for_index does once the embedding dimension is known:
+    // open storage + init(dimension). It must not hit SchemaMismatch from
+    // the earlier init(0), and data written in phase 1 must survive.
+    let storage = SqliteStorage::open_workspace(tmp.path()).unwrap();
+    storage.init(512).unwrap();
+    let collections = storage.list_collections().unwrap();
+    assert_eq!(collections.len(), 1);
+    assert_eq!(collections[0].name, "notes");
+  }
+
+  #[tokio::test]
+  async fn test_index_then_data_only_reads_indexed_data() {
+    let tmp = TempDir::new().unwrap();
+
+    // Phase 1: full (model-backed) engine indexes a document into the workspace.
+    {
+      let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::open_workspace(tmp.path()).unwrap());
+      storage.init(512).unwrap();
+      let engine = Engine::new(test_components(storage));
+
+      let notes_dir = TempDir::new().unwrap();
+      std::fs::write(notes_dir.path().join("note.txt"), "今天是我的生日").unwrap();
+      engine.add_collection("notes", notes_dir.path()).unwrap();
+      let stats = engine.index().await.unwrap();
+      assert!(stats.chunks_indexed > 0);
+    }
+
+    // Phase 2: reopen data-only — indexed data must be intact and readable.
+    {
+      let engine = Engine::open_data_only(EngineConfig {
+        workspace_path: tmp.path().to_path_buf(),
+        model_cache_dir: tmp.path().join("models"),
+        config: crate::config::DocqConfig::default(),
+        verbose: Verbose(false),
+      })
+      .unwrap();
+
+      let status = engine.status().unwrap();
+      assert_eq!(status.documents, 1);
+      assert!(status.chunks > 0);
+      assert_eq!(status.collections.len(), 1);
+    }
+
+    // Phase 3: the document itself is still retrievable at the storage level.
+    let storage = SqliteStorage::open_workspace(tmp.path()).unwrap();
+    let docs = storage.list_documents().unwrap();
+    assert_eq!(docs.len(), 1);
+    assert!(storage.get_document(&docs[0].id).unwrap().is_some());
   }
 
   #[tokio::test]

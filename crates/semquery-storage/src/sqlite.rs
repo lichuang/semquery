@@ -721,6 +721,16 @@ mod tests {
   }
 
   #[test]
+  fn test_init_zero_then_dimension() {
+    // `semq init` / Engine::open_data_only use init(0), which must skip
+    // creating the vec table so a later init(512) from open_for_search /
+    // open_for_ask can create it with the real dimension.
+    let storage = SqliteStorage::open_in_memory().unwrap();
+    storage.init(0).unwrap();
+    storage.init(512).unwrap();
+  }
+
+  #[test]
   fn test_document_crud() {
     let storage = SqliteStorage::open_in_memory().unwrap();
     storage.init(512).unwrap();
