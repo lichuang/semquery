@@ -8,6 +8,7 @@ use semquery_core::{
   Chunk, Chunker, DocqError, Document, Embedder, IndexEvent, ModelRole, ModelSpec, Result, Storage, Verbose,
   WordSegmenter,
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::{self, Sender};
 use tokio_stream::Stream;
@@ -18,7 +19,7 @@ use crate::ReaderRegistry;
 
 const EMBED_BATCH_SIZE: usize = 500;
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct IndexStats {
   pub files_indexed: usize,
   pub files_skipped: usize,
@@ -559,6 +560,32 @@ mod tests {
   use semquery_core::{ChunkCandidate, Embedder};
   use semquery_storage::SqliteStorage;
   use tempfile::TempDir;
+
+  #[test]
+  fn test_index_stats_and_event_json_roundtrip() {
+    let stats = IndexStats {
+      files_indexed: 3,
+      files_skipped: 1,
+      files_removed: 2,
+      chunks_indexed: 42,
+    };
+    let json = serde_json::to_string(&stats).unwrap();
+    assert_eq!(serde_json::from_str::<IndexStats>(&json).unwrap(), stats);
+
+    let event = IndexEvent::Complete {
+      files: 3,
+      chunks: 42,
+      files_skipped: 1,
+      files_removed: 2,
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(serde_json::from_str::<IndexEvent>(&json).unwrap(), event);
+
+    // Tagged-enum representation must also handle the unit variant.
+    let event = IndexEvent::WritingStore;
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(serde_json::from_str::<IndexEvent>(&json).unwrap(), event);
+  }
 
   struct StubEmbedder {
     dim: usize,

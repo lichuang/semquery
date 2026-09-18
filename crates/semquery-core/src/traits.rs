@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::models::{Chunk, ChunkCandidate, Collection, Document, DocumentSource, ModelRole, ModelSpec};
@@ -114,7 +115,8 @@ pub trait StorageTx {
 /// Consume these events via [`Indexer::index_file_stream`](semquery_indexer::Indexer::index_file_stream),
 /// [`Indexer::index_directory_stream`](semquery_indexer::Indexer::index_directory_stream), or the
 /// [`Engine::index_stream`](semquery::Engine::index_stream) family of methods.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum IndexEvent {
   /// Indexing started; number of sources/files to process.
   ScanStart {

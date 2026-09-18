@@ -26,6 +26,7 @@ chrono = { workspace = true }
 log = { workspace = true }
 rayon = { workspace = true }
 tokio-stream = { workspace = true }
+serde = { workspace = true }
 pdf-extract = { workspace = true, optional = true }
 zip = { workspace = true, optional = true }
 quick-xml = { workspace = true, optional = true }
@@ -37,5 +38,6 @@ docx = ["dep:zip", "dep:quick-xml"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
+serde_json = { workspace = true }
 lopdf = { workspace = true }
 zip = { workspace = true }
