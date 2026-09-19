@@ -116,7 +116,7 @@ impl Default for LoggingConfig {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DocqConfig {
+pub struct SemqConfig {
   pub models: ModelsConfig,
   pub indexing: IndexingConfig,
   pub retrieval: RetrievalConfig,
@@ -194,7 +194,7 @@ impl Default for LlmGenerationConfig {
   }
 }
 
-impl DocqConfig {
+impl SemqConfig {
   pub fn load(workspace: &Path) -> anyhow::Result<Self> {
     let path = Self::path(workspace);
     if !path.exists() {
@@ -225,9 +225,9 @@ mod tests {
 
   #[test]
   fn test_default_config_roundtrip() {
-    let config = DocqConfig::default();
+    let config = SemqConfig::default();
     let toml = config.to_toml().unwrap();
-    let parsed: DocqConfig = toml::from_str(&toml).unwrap();
+    let parsed: SemqConfig = toml::from_str(&toml).unwrap();
     assert_eq!(parsed.indexing.chunk_size, config.indexing.chunk_size);
     assert_eq!(parsed.retrieval.rrf_k, config.retrieval.rrf_k);
     assert_eq!(parsed.llm.temperature, config.llm.temperature);
@@ -236,7 +236,7 @@ mod tests {
   #[test]
   fn test_load_missing_returns_default() {
     let tmp = TempDir::new().unwrap();
-    let config = DocqConfig::load(tmp.path()).unwrap();
+    let config = SemqConfig::load(tmp.path()).unwrap();
     assert_eq!(config.indexing.chunk_size, semquery_model::BGE_SMALL_ZH_V1_5_MAX_TOKENS);
   }
 }

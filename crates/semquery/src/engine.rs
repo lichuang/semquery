@@ -24,14 +24,14 @@ use tokio_stream::Stream;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::config::{DocqConfig, RetrievalConfig};
+use crate::config::{RetrievalConfig, SemqConfig};
 use semquery_storage::SqliteStorage;
 use semquery_synth::{Synthesizer, SynthesizerConfig};
 
 pub struct EngineConfig {
   pub workspace_path: PathBuf,
   pub model_cache_dir: PathBuf,
-  pub config: DocqConfig,
+  pub config: SemqConfig,
   pub verbose: Verbose,
 }
 
@@ -51,7 +51,7 @@ pub struct EngineComponents {
   /// first use (see the lazy-loading refactor); `Engine::new` pre-fills the
   /// OnceCells below from these components.
   pub hub: ModelHub,
-  pub config: DocqConfig,
+  pub config: SemqConfig,
   pub chunker: Arc<dyn Chunker>,
   pub embedder: Arc<dyn Embedder>,
   pub segmenter: Arc<dyn WordSegmenter>,
@@ -68,7 +68,7 @@ pub struct EngineComponents {
 pub struct Engine {
   storage: Arc<dyn Storage>,
   hub: ModelHub,
-  config: DocqConfig,
+  config: SemqConfig,
   embedder: Arc<OnceCell<Arc<dyn Embedder>>>,
   reranker: Arc<OnceCell<Arc<dyn Reranker>>>,
   llm: Arc<OnceCell<Arc<dyn Llm>>>,
@@ -368,7 +368,7 @@ impl Engine {
   async fn ensure_embedder(
     embedder_cell: &Arc<OnceCell<Arc<dyn Embedder>>>,
     hub: &ModelHub,
-    config: &DocqConfig,
+    config: &SemqConfig,
     storage: &dyn Storage,
     mut on_download: impl FnMut(&ModelSpec, DownloadPhase),
   ) -> Result<Arc<dyn Embedder>> {
@@ -389,7 +389,7 @@ impl Engine {
   async fn ensure_chunker(
     chunker_cell: &Arc<OnceCell<Arc<dyn Chunker>>>,
     hub: &ModelHub,
-    config: &DocqConfig,
+    config: &SemqConfig,
     storage: &dyn Storage,
     mut on_download: impl FnMut(&ModelSpec, DownloadPhase),
   ) -> Result<Arc<dyn Chunker>> {
@@ -420,7 +420,7 @@ impl Engine {
   async fn ensure_reranker(
     reranker_cell: &Arc<OnceCell<Arc<dyn Reranker>>>,
     hub: &ModelHub,
-    config: &DocqConfig,
+    config: &SemqConfig,
     storage: &dyn Storage,
     mut on_download: impl FnMut(&ModelSpec, DownloadPhase),
   ) -> Result<Arc<dyn Reranker>> {
@@ -438,7 +438,7 @@ impl Engine {
   async fn ensure_llm(
     llm_cell: &Arc<OnceCell<Arc<dyn Llm>>>,
     hub: &ModelHub,
-    config: &DocqConfig,
+    config: &SemqConfig,
     storage: &dyn Storage,
     mut on_download: impl FnMut(&ModelSpec, DownloadPhase),
   ) -> Result<Arc<dyn Llm>> {
@@ -608,7 +608,7 @@ impl Engine {
   pub fn ask_stream(
     &self,
     query: impl Into<String>,
-  ) -> Result<impl Stream<Item = std::result::Result<semquery_core::AskEvent, semquery_core::DocqError>> + Send + 'static>
+  ) -> Result<impl Stream<Item = std::result::Result<semquery_core::AskEvent, semquery_core::SemqError>> + Send + 'static>
   {
     Ok(self.spawn_ask(query.into()))
   }
@@ -621,8 +621,8 @@ impl Engine {
   fn spawn_ask(
     &self,
     query: String,
-  ) -> impl Stream<Item = std::result::Result<semquery_core::AskEvent, semquery_core::DocqError>> + Send + 'static {
-    let (tx, rx) = mpsc::channel::<std::result::Result<semquery_core::AskEvent, semquery_core::DocqError>>(32);
+  ) -> impl Stream<Item = std::result::Result<semquery_core::AskEvent, semquery_core::SemqError>> + Send + 'static {
+    let (tx, rx) = mpsc::channel::<std::result::Result<semquery_core::AskEvent, semquery_core::SemqError>>(32);
     let synthesizer = self.synthesizer.clone();
     let retriever = self.retriever.clone();
     let embedder_cell = self.embedder.clone();
@@ -787,7 +787,7 @@ mod tests {
     EngineComponents {
       storage,
       hub: ModelHub::new(std::env::temp_dir().join("semq-test-model-cache")),
-      config: crate::config::DocqConfig::default(),
+      config: crate::config::SemqConfig::default(),
       chunker: Arc::new(StubChunker),
       embedder: Arc::new(StubEmbedder { dim: 512 }),
       segmenter: Arc::new(JiebaSegmenter),
@@ -945,12 +945,12 @@ mod tests {
     // Point the embedding model at a repo that cannot exist so the lazy load
     // triggered by index() fails fast (404 / DNS error) instead of
     // downloading a real model in a unit test.
-    let mut docq_config = crate::config::DocqConfig::default();
-    docq_config.models.embedding.repo_id = "nonexistent/repo".into();
+    let mut semq_config = crate::config::SemqConfig::default();
+    semq_config.models.embedding.repo_id = "nonexistent/repo".into();
     let config = EngineConfig {
       workspace_path: tmp.path().to_path_buf(),
       model_cache_dir: tmp.path().join("models"),
-      config: docq_config,
+      config: semq_config,
       verbose: Verbose(false),
     };
     let engine = Engine::open(config).unwrap();
@@ -1016,7 +1016,7 @@ mod tests {
     let engine = Engine::open(EngineConfig {
       workspace_path: tmp.path().to_path_buf(),
       model_cache_dir: tmp.path().join("models"),
-      config: crate::config::DocqConfig::default(),
+      config: crate::config::SemqConfig::default(),
       verbose: Verbose(false),
     })
     .unwrap();
@@ -1058,7 +1058,7 @@ mod tests {
       let engine = Engine::open(EngineConfig {
         workspace_path: tmp.path().to_path_buf(),
         model_cache_dir: tmp.path().join("models"),
-        config: crate::config::DocqConfig::default(),
+        config: crate::config::SemqConfig::default(),
         verbose: Verbose(false),
       })
       .unwrap();
@@ -1100,7 +1100,7 @@ mod tests {
       let engine = Engine::open(EngineConfig {
         workspace_path: tmp.path().to_path_buf(),
         model_cache_dir: tmp.path().join("models"),
-        config: crate::config::DocqConfig::default(),
+        config: crate::config::SemqConfig::default(),
         verbose: Verbose(false),
       })
       .unwrap();
@@ -1125,13 +1125,13 @@ mod tests {
     // No LLM injected: ask() falls back to lazy loading, which must fail
     // fast. Point reranker/llm at repos that cannot exist so no real
     // download is attempted (the embedder cell is pre-filled with a stub).
-    let mut docq_config = crate::config::DocqConfig::default();
-    docq_config.models.reranker.repo_id = "nonexistent/repo".into();
-    docq_config.models.llm.repo_id = "nonexistent/repo".into();
+    let mut semq_config = crate::config::SemqConfig::default();
+    semq_config.models.reranker.repo_id = "nonexistent/repo".into();
+    semq_config.models.llm.repo_id = "nonexistent/repo".into();
     let components = EngineComponents {
       storage,
       hub: ModelHub::new(std::env::temp_dir().join("semq-test-model-cache")),
-      config: docq_config,
+      config: semq_config,
       chunker: Arc::new(StubChunker),
       embedder: Arc::new(StubEmbedder { dim: 512 }),
       segmenter: Arc::new(JiebaSegmenter),

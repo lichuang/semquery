@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum DocqError {
+pub enum SemqError {
   #[error("parse error: {0}")]
   Parse(#[from] ParseError),
 
@@ -24,7 +24,7 @@ pub enum DocqError {
   Model(#[from] ModelError),
 }
 
-pub type Result<T> = std::result::Result<T, DocqError>;
+pub type Result<T> = std::result::Result<T, SemqError>;
 
 #[derive(Debug, Error)]
 pub enum ParseError {

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use rayon::prelude::*;
 use semquery_core::{
-  Chunk, Chunker, DocqError, Document, Embedder, IndexEvent, ModelRole, ModelSpec, Result, Storage, Verbose,
+  Chunk, Chunker, Document, Embedder, IndexEvent, ModelRole, ModelSpec, Result, SemqError, Storage, Verbose,
   WordSegmenter,
 };
 use serde::{Deserialize, Serialize};
@@ -41,7 +41,7 @@ impl std::ops::Add for IndexStats {
   }
 }
 
-type IndexEventItem = std::result::Result<IndexEvent, DocqError>;
+type IndexEventItem = std::result::Result<IndexEvent, SemqError>;
 pub type IndexEventSender = Sender<IndexEventItem>;
 
 async fn send_event(tx: &IndexEventSender, event: IndexEvent) -> bool {

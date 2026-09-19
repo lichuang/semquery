@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use semquery_core::{
-  Chunk, DocqError, EmbedError, Embedder, ModelError, Reranker, Result, RetrieveError, ScoreExplain, ScoredChunk,
-  SearchEvent, SearchHit, SearchStage, SearchStats, Storage, Verbose, WordSegmenter,
+  Chunk, EmbedError, Embedder, ModelError, Reranker, Result, RetrieveError, ScoreExplain, ScoredChunk, SearchEvent,
+  SearchHit, SearchStage, SearchStats, SemqError, Storage, Verbose, WordSegmenter,
 };
 use tokio::sync::OnceCell;
 use tokio::sync::mpsc::{self, Sender};
@@ -18,7 +18,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::fusion;
 
-type SearchEventItem = std::result::Result<SearchEvent, DocqError>;
+type SearchEventItem = std::result::Result<SearchEvent, SemqError>;
 type SearchEventSender = Sender<SearchEventItem>;
 
 async fn send_event(tx: &SearchEventSender, event: SearchEvent) -> bool {
@@ -349,7 +349,7 @@ impl Retriever {
     self: Arc<Self>,
     query: impl Into<String>,
     top_k: usize,
-  ) -> impl Stream<Item = std::result::Result<SearchEvent, DocqError>> + Send + 'static {
+  ) -> impl Stream<Item = std::result::Result<SearchEvent, SemqError>> + Send + 'static {
     let (tx, rx) = mpsc::channel::<SearchEventItem>(32);
     let query = query.into();
 
@@ -373,7 +373,7 @@ impl Retriever {
     query: &str,
     top_k: usize,
     tx: &SearchEventSender,
-  ) -> std::result::Result<(), DocqError> {
+  ) -> std::result::Result<(), SemqError> {
     let total_start = Instant::now();
     let mut stats = SearchStats::default();
 

@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
 
-use config::{DocqConfig, LoggingConfig};
+use config::{LoggingConfig, SemqConfig};
 
 use clap::{Parser, Subcommand};
 use flexi_logger::{Cleanup, Criterion, DeferredNow, Duplicate, FileSpec, Logger, Naming, Record, WriteMode};
@@ -173,7 +173,7 @@ async fn main() {
   let workspace = cli.workspace.unwrap_or_else(default_workspace);
   let model_cache = cli.model_cache.unwrap_or_else(default_model_cache);
   let config_result = match cli.config {
-    Some(ref path) => DocqConfig::load_from_file(path),
+    Some(ref path) => SemqConfig::load_from_file(path),
     None => ensure_config(),
   };
   let config = match config_result {
@@ -269,14 +269,14 @@ fn init_logger(
 
 /// Ensure the global config directory and `config.toml` exist.
 /// If the config file is missing, write a default one and return it.
-fn ensure_config() -> anyhow::Result<DocqConfig> {
+fn ensure_config() -> anyhow::Result<SemqConfig> {
   let config_dir = default_config_dir();
   fs::create_dir_all(&config_dir)?;
-  let config_path = DocqConfig::path(&config_dir);
+  let config_path = SemqConfig::path(&config_dir);
   if config_path.exists() {
-    DocqConfig::load(&config_dir)
+    SemqConfig::load(&config_dir)
   } else {
-    let cfg = DocqConfig::default();
+    let cfg = SemqConfig::default();
     fs::write(&config_path, cfg.to_toml()?)
       .map_err(|e| anyhow::anyhow!("write default config {}: {e}", config_path.display()))?;
     Ok(cfg)
@@ -287,7 +287,7 @@ async fn run_command(
   cmd: &Commands,
   workspace: &Path,
   model_cache: &Path,
-  config: DocqConfig,
+  config: SemqConfig,
   verbose: Verbose,
 ) -> anyhow::Result<()> {
   fs::create_dir_all(workspace)?;
@@ -367,7 +367,7 @@ fn run_status(workspace: &Path, json: bool) -> anyhow::Result<()> {
 async fn run_index(
   workspace: &Path,
   model_cache: &Path,
-  config: DocqConfig,
+  config: SemqConfig,
   verbose: Verbose,
   collection: Option<&str>,
 ) -> anyhow::Result<()> {
@@ -413,7 +413,7 @@ where
 async fn run_search(
   workspace: &Path,
   model_cache: &Path,
-  config: DocqConfig,
+  config: SemqConfig,
   verbose: Verbose,
   query: &str,
   top_k: usize,
@@ -474,7 +474,7 @@ async fn run_search(
 async fn run_ask(
   workspace: &Path,
   model_cache: &Path,
-  config: DocqConfig,
+  config: SemqConfig,
   verbose: Verbose,
   query: &str,
   json: bool,
@@ -540,7 +540,7 @@ fn open_storage(workspace: &Path) -> anyhow::Result<SqliteStorage> {
   Ok(storage)
 }
 
-fn engine_config(workspace: &Path, model_cache: &Path, config: DocqConfig, verbose: Verbose) -> EngineConfig {
+fn engine_config(workspace: &Path, model_cache: &Path, config: SemqConfig, verbose: Verbose) -> EngineConfig {
   EngineConfig {
     workspace_path: workspace.to_path_buf(),
     model_cache_dir: model_cache.to_path_buf(),

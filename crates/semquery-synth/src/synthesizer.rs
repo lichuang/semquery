@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use futures_core::Stream;
-use semquery_core::{Answer, AskEvent, Citation, DocqError, Llm, ModelError, Result, SearchEvent, Verbose};
+use semquery_core::{Answer, AskEvent, Citation, Llm, ModelError, Result, SearchEvent, SemqError, Verbose};
 use tokio::sync::OnceCell;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -12,7 +12,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::citation::parse_citations;
 use crate::prompt::build_ask_prompt;
 
-type AskEventItem = std::result::Result<AskEvent, DocqError>;
+type AskEventItem = std::result::Result<AskEvent, SemqError>;
 type AskEventSender = mpsc::Sender<AskEventItem>;
 
 pub struct SynthesizerConfig {

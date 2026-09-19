@@ -271,7 +271,7 @@
 
 #### Step 1 — Engine 组件 OnceCell 化 ✅ 已完成
 
-- `Engine` 持有 `embedder: OnceCell<Arc<dyn Embedder>>`、`reranker: OnceCell<Arc<dyn Reranker>>`、`llm: OnceCell<Arc<dyn Llm>>`，同时保留 `ModelHub` 和 `DocqConfig` 字段供懒加载使用。
+- `Engine` 持有 `embedder: OnceCell<Arc<dyn Embedder>>`、`reranker: OnceCell<Arc<dyn Reranker>>`、`llm: OnceCell<Arc<dyn Llm>>`，同时保留 `ModelHub` 和 `SemqConfig` 字段供懒加载使用。
 - 保留 `Engine::new(components)` 作为测试 / 依赖注入入口：预填充 OnceCell（`OnceCell::from(...)`），现有测试基本不动。
 - `EngineComponents` 相应增加 `hub` / `config` 两个字段；`open_data_only` 留下空 OnceCell。
 - 备注：新字段在 Step 4/5 才有读取方，Step 1 加了 scoped `#[allow(dead_code)]`（带注释），首个读取方落地后移除。

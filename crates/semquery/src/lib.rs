@@ -11,5 +11,5 @@ pub mod engine;
 // (Answer, Citation, Verbose, etc.) without adding a separate dependency.
 pub use semquery_core;
 
-pub use config::DocqConfig;
+pub use config::SemqConfig;
 pub use engine::{Engine, EngineComponents, EngineConfig};
