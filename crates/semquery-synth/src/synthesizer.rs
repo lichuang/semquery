@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use futures_core::Stream;
-use semquery_core::{Answer, AskEvent, Citation, DocqError, Llm, Result, SearchEvent, Verbose};
+use semquery_core::{Answer, AskEvent, Citation, DocqError, Llm, ModelError, Result, SearchEvent, Verbose};
+use tokio::sync::OnceCell;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -16,14 +17,17 @@ type AskEventSender = mpsc::Sender<AskEventItem>;
 
 pub struct SynthesizerConfig {
   pub retriever: Arc<semquery_retrieve::Retriever>,
-  pub llm: Arc<dyn Llm>,
+  /// Lazily-loaded LLM, shared with the engine. The engine fills the cell
+  /// (eagerly today, on first ask use after the lazy-loading refactor); the
+  /// synthesizer only reads it.
+  pub llm: Arc<OnceCell<Arc<dyn Llm>>>,
   pub verbose: Verbose,
 }
 
 #[derive(Clone)]
 pub struct Synthesizer {
   retriever: Arc<semquery_retrieve::Retriever>,
-  llm: Arc<dyn Llm>,
+  llm: Arc<OnceCell<Arc<dyn Llm>>>,
   verbose: Verbose,
 }
 
@@ -44,6 +48,10 @@ impl Synthesizer {
   /// the markers generated from the retrieved hits. Invalid markers (e.g.
   /// `[3]` when only 2 chunks were retrieved) are silently dropped.
   pub async fn ask(&self, query: &str) -> Result<Answer> {
+    let llm = self.llm.get().ok_or(ModelError::NotLoaded {
+      component: "llm",
+      opener: "Engine::open",
+    })?;
     let _total = self.verbose.start("ask");
 
     // ---- Retrieve top-5 chunks relevant to the query ----
@@ -71,7 +79,7 @@ impl Synthesizer {
     // ---- Generate the answer via the LLM ----
     let raw = {
       let _step = self.verbose.start("LLM complete");
-      self.llm.complete(&prompt).await?
+      llm.complete(&prompt).await?
     };
 
     // ---- Parse and validate citation markers from the answer ----
@@ -154,6 +162,10 @@ impl Synthesizer {
           stats.retrieve_ms = search_stats.total_ms;
           hits = grounded;
         }
+        // Download events cannot appear here: the synthesizer's retriever is
+        // always pre-loaded (lazy download events are emitted by the engine
+        // before the ask pipeline starts).
+        SearchEvent::ModelDownloadStart { .. } | SearchEvent::ModelDownloadComplete { .. } => {}
       }
     }
     if tx.send(Ok(AskEvent::Hits { hits: hits.clone() })).await.is_err() {
@@ -180,15 +192,37 @@ impl Synthesizer {
     stats.prompt_ms = prompt_start.elapsed().as_millis() as u64;
 
     // ---- Generate the answer, streaming each token ----
-    // The sync token callback uses `try_send`: sending a progress token into a
-    // full channel drops that event rather than blocking the decode loop —
-    // the full text still arrives with the terminal `AnswerComplete`.
+    // The decode loop inside `complete_stream` is fully synchronous and never
+    // yields to the runtime, so it occupies one executor worker for the whole
+    // generation. A `try_send` here would silently drop tokens whenever the
+    // consumer has not drained the channel yet (capacity 32). `block_in_place`
+    // marks this thread as blocking — the runtime spins up a replacement
+    // worker so the consumer keeps draining — and `blocking_send` guarantees
+    // every token reaches the stream.
     let llm_start = Instant::now();
     let prompt = prompt.to_string();
     let mut on_token = |piece: String| {
-      let _ = tx.try_send(Ok(AskEvent::Token { delta: piece }));
+      let event = Ok(AskEvent::Token { delta: piece });
+      // `block_in_place` panics on the current-thread runtime (used by
+      // `#[tokio::test]`); there we fall back to a best-effort `try_send` —
+      // test LLMs emit a single token, so nothing is dropped.
+      let multi_thread = matches!(
+        tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()),
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread)
+      );
+      if multi_thread {
+        tokio::task::block_in_place(|| {
+          let _ = tx.blocking_send(event);
+        });
+      } else {
+        let _ = tx.try_send(event);
+      }
     };
-    let raw = self.llm.complete_stream(&prompt, &mut on_token).await?;
+    let llm = self.llm.get().ok_or(ModelError::NotLoaded {
+      component: "llm",
+      opener: "Engine::open",
+    })?;
+    let raw = llm.complete_stream(&prompt, &mut on_token).await?;
     stats.llm_ms = llm_start.elapsed().as_millis() as u64;
 
     // ---- Parse and validate citations, back-fill sources ----
@@ -283,6 +317,14 @@ mod tests {
     }
   }
 
+  fn stub_embedder_cell() -> Arc<OnceCell<Arc<dyn Embedder>>> {
+    Arc::new(OnceCell::from(Arc::new(StubEmbedder { dim: 512 }) as Arc<dyn Embedder>))
+  }
+
+  fn llm_cell(llm: StubLlm) -> Arc<OnceCell<Arc<dyn Llm>>> {
+    Arc::new(OnceCell::from(Arc::new(llm) as Arc<dyn Llm>))
+  }
+
   fn test_readers() -> ReaderRegistry {
     let mut reg = ReaderRegistry::new();
     reg.register(Arc::new(TextFileReader::new()));
@@ -302,7 +344,7 @@ mod tests {
       std::fs::write(&path, content).unwrap();
       let indexer = Indexer::new(IndexerConfig {
         chunker: Arc::new(StubChunker),
-        embedder: Arc::new(StubEmbedder { dim: 512 }),
+        embedder: stub_embedder_cell(),
         segmenter: Arc::new(JiebaSegmenter),
         storage: storage.clone(),
         readers: test_readers(),
@@ -324,7 +366,7 @@ mod tests {
   fn test_retriever(storage: &Arc<SqliteStorage>) -> Retriever {
     Retriever::new(RetrieverConfig {
       storage: storage.clone(),
-      embedder: Arc::new(StubEmbedder { dim: 512 }),
+      embedder: stub_embedder_cell(),
       segmenter: Arc::new(JiebaSegmenter),
       reranker: None,
       bm25_top_k: 100,
@@ -351,7 +393,7 @@ mod tests {
 
     let synth = Synthesizer::new(SynthesizerConfig {
       retriever: Arc::new(retriever),
-      llm: Arc::new(llm),
+      llm: llm_cell(llm),
       verbose: Verbose(false),
     });
 
@@ -374,7 +416,7 @@ mod tests {
 
     let synth = Synthesizer::new(SynthesizerConfig {
       retriever: Arc::new(retriever),
-      llm: Arc::new(llm),
+      llm: llm_cell(llm),
       verbose: Verbose(false),
     });
 
@@ -393,7 +435,7 @@ mod tests {
 
     let synth = Synthesizer::new(SynthesizerConfig {
       retriever: Arc::new(retriever),
-      llm: Arc::new(llm),
+      llm: llm_cell(llm),
       verbose: Verbose(false),
     });
 
@@ -418,7 +460,7 @@ mod tests {
 
     let synth = Synthesizer::new(SynthesizerConfig {
       retriever: Arc::new(retriever),
-      llm: Arc::new(llm),
+      llm: llm_cell(llm),
       verbose: Verbose(false),
     });
 

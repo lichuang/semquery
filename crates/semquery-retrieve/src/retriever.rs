@@ -7,9 +7,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use semquery_core::{
-  Chunk, DocqError, EmbedError, Embedder, Reranker, Result, RetrieveError, ScoreExplain, ScoredChunk, SearchEvent,
-  SearchHit, SearchStage, SearchStats, Storage, Verbose, WordSegmenter,
+  Chunk, DocqError, EmbedError, Embedder, ModelError, Reranker, Result, RetrieveError, ScoreExplain, ScoredChunk,
+  SearchEvent, SearchHit, SearchStage, SearchStats, Storage, Verbose, WordSegmenter,
 };
+use tokio::sync::OnceCell;
 use tokio::sync::mpsc::{self, Sender};
 use tokio_stream::Stream;
 use tokio_stream::StreamExt;
@@ -31,9 +32,12 @@ async fn send_event(tx: &SearchEventSender, event: SearchEvent) -> bool {
 
 pub struct RetrieverConfig {
   pub storage: Arc<dyn Storage>,
-  pub embedder: Arc<dyn Embedder>,
+  /// Lazily-loaded model backends, shared with the engine. The engine fills
+  /// the cells (eagerly today, on first stream use after the lazy-loading
+  /// refactor); the retriever only reads them.
+  pub embedder: Arc<OnceCell<Arc<dyn Embedder>>>,
   pub segmenter: Arc<dyn WordSegmenter>,
-  pub reranker: Option<Arc<dyn Reranker>>,
+  pub reranker: Option<Arc<OnceCell<Arc<dyn Reranker>>>>,
   /// BM25 recall depth (default 100).
   pub bm25_top_k: usize,
   /// Vector recall depth (default 100).
@@ -49,9 +53,9 @@ pub struct RetrieverConfig {
 #[derive(Clone)]
 pub struct Retriever {
   storage: Arc<dyn Storage>,
-  embedder: Arc<dyn Embedder>,
+  embedder: Arc<OnceCell<Arc<dyn Embedder>>>,
   segmenter: Arc<dyn WordSegmenter>,
-  reranker: Option<Arc<dyn Reranker>>,
+  reranker: Option<Arc<OnceCell<Arc<dyn Reranker>>>>,
   bm25_top_k: usize,
   vector_top_k: usize,
   rrf_k: usize,
@@ -181,7 +185,11 @@ impl Retriever {
     let embed_start = Instant::now();
     let query_embedding = {
       let _step = self.verbose.start("embed query");
-      self.embedder.embed(&[query.to_string()]).await?.into_iter().next().ok_or(EmbedError::EmptyResult)?
+      let embedder = self.embedder.get().ok_or(ModelError::NotLoaded {
+        component: "embedder",
+        opener: "Engine::open",
+      })?;
+      embedder.embed(&[query.to_string()]).await?.into_iter().next().ok_or(EmbedError::EmptyResult)?
     };
     let embed_ms = embed_start.elapsed().as_millis() as u64;
     if let Err(e) = tx
@@ -247,7 +255,7 @@ impl Retriever {
         let map = chunks.into_iter().map(|c| (c.id.clone(), c)).collect();
         Ok((map, HashMap::new(), fused))
       }
-      Some(reranker) => {
+      Some(reranker_cell) => {
         // The reranker receives the raw query (not jieba-segmented) because it
         // runs its own BERT-style tokenization. It produces a single relevance
         // score per (query, chunk) pair — higher is better, same direction as RRF.
@@ -258,6 +266,10 @@ impl Retriever {
         let rerank_chunks: Vec<Chunk> = ids.iter().filter_map(|id| chunk_map.get(id).cloned()).collect();
         let scored: Vec<ScoredChunk> = {
           let _step = self.verbose.start("rerank");
+          let reranker = reranker_cell.get().ok_or(ModelError::NotLoaded {
+            component: "reranker",
+            opener: "Engine::open",
+          })?;
           reranker.rerank(query, &rerank_chunks).await?
         };
         let rerank_map: HashMap<String, f32> = scored.into_iter().map(|sc| (sc.chunk.id, sc.score)).collect();
@@ -628,7 +640,7 @@ mod tests {
       std::fs::write(&path, content).unwrap();
       let indexer = Indexer::new(IndexerConfig {
         chunker: Arc::new(StubChunker),
-        embedder: Arc::new(StubEmbedder { dim: 512 }),
+        embedder: stub_embedder_cell(),
         segmenter: Arc::new(JiebaSegmenter),
         storage: storage.clone(),
         readers: test_readers(),
@@ -659,13 +671,21 @@ mod tests {
     s
   }
 
+  fn stub_embedder_cell() -> Arc<OnceCell<Arc<dyn Embedder>>> {
+    Arc::new(OnceCell::from(Arc::new(StubEmbedder { dim: 512 }) as Arc<dyn Embedder>))
+  }
+
+  fn stub_reranker_cell(reranker: Arc<dyn Reranker>) -> Arc<OnceCell<Arc<dyn Reranker>>> {
+    Arc::new(OnceCell::from(reranker))
+  }
+
   /// Base config shared by all retriever tests; only the reranker varies.
   fn test_retriever_config(storage: &Arc<SqliteStorage>, reranker: Option<Arc<dyn Reranker>>) -> RetrieverConfig {
     RetrieverConfig {
       storage: storage.clone(),
-      embedder: Arc::new(StubEmbedder { dim: 512 }),
+      embedder: stub_embedder_cell(),
       segmenter: Arc::new(JiebaSegmenter),
-      reranker,
+      reranker: reranker.map(stub_reranker_cell),
       bm25_top_k: 100,
       vector_top_k: 100,
       rrf_k: 60,

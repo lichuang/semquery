@@ -119,7 +119,7 @@ pub enum LlmError {
   #[error("inference: {0}")]
   InferenceFailed(String),
 
-  #[error("LLM not loaded — use open_for_ask")]
+  #[error("LLM not loaded")]
   NotLoaded,
 
   #[error("invalid config: {0}")]

@@ -371,17 +371,42 @@ async fn run_index(
   verbose: Verbose,
   collection: Option<&str>,
 ) -> anyhow::Result<()> {
-  let engine = Engine::open_for_index(engine_config(workspace, model_cache, config, verbose)).await?;
-  let stats = if let Some(name) = collection {
-    engine.index_one(name).await?
+  let engine = Engine::open(engine_config(workspace, model_cache, config, verbose))?;
+  let (files, chunks, skipped, removed) = if let Some(name) = collection {
+    drain_index_stream(engine.index_one_stream(name)?).await?
   } else {
-    engine.index().await?
+    drain_index_stream(engine.index_stream()?).await?
   };
-  println!(
-    "Indexed {} files ({} chunks, {} skipped, {} removed)",
-    stats.files_indexed, stats.chunks_indexed, stats.files_skipped, stats.files_removed
-  );
+  println!("Indexed {files} files ({chunks} chunks, {skipped} skipped, {removed} removed)");
   Ok(())
+}
+
+/// Consume an index stream to the terminal `Complete` event, printing model
+/// download progress to stderr along the way.
+async fn drain_index_stream<S>(mut stream: S) -> anyhow::Result<(usize, usize, usize, usize)>
+where
+  S: tokio_stream::Stream<Item = semquery_core::Result<semquery_core::IndexEvent>> + Unpin,
+{
+  use tokio_stream::StreamExt;
+  let mut stats = None;
+  while let Some(event) = stream.next().await {
+    match event? {
+      semquery_core::IndexEvent::ModelDownloadStart { repo_id, filename, .. } => {
+        eprintln!("Downloading model {repo_id}/{filename} ...");
+      }
+      semquery_core::IndexEvent::ModelDownloadComplete { elapsed_ms, .. } => {
+        eprintln!("Model downloaded in {elapsed_ms} ms");
+      }
+      semquery_core::IndexEvent::Complete {
+        files,
+        chunks,
+        files_skipped,
+        files_removed,
+      } => stats = Some((files, chunks, files_skipped, files_removed)),
+      _ => {}
+    }
+  }
+  stats.ok_or_else(|| anyhow::anyhow!("index stream ended without a Complete event"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -395,8 +420,23 @@ async fn run_search(
   explain: bool,
   json: bool,
 ) -> anyhow::Result<()> {
-  let engine = Engine::open_for_search(engine_config(workspace, model_cache, config, verbose)).await?;
-  let hits = engine.search(query, top_k).await?;
+  use tokio_stream::StreamExt;
+
+  let engine = Engine::open(engine_config(workspace, model_cache, config, verbose))?;
+  let mut stream = std::pin::pin!(engine.search_stream(query, top_k)?);
+  let mut hits = Vec::new();
+  while let Some(event) = stream.next().await {
+    match event? {
+      semquery_core::SearchEvent::ModelDownloadStart { repo_id, filename, .. } => {
+        eprintln!("Downloading model {repo_id}/{filename} ...");
+      }
+      semquery_core::SearchEvent::ModelDownloadComplete { elapsed_ms, .. } => {
+        eprintln!("Model downloaded in {elapsed_ms} ms");
+      }
+      semquery_core::SearchEvent::Completed { hits: final_hits, .. } => hits = final_hits,
+      _ => {}
+    }
+  }
 
   if json {
     let output: Vec<serde_json::Value> = hits
@@ -441,7 +481,7 @@ async fn run_ask(
 ) -> anyhow::Result<()> {
   use tokio_stream::StreamExt;
 
-  let engine = Engine::open_for_ask(engine_config(workspace, model_cache, config, verbose)).await?;
+  let engine = Engine::open(engine_config(workspace, model_cache, config, verbose))?;
   let mut stream = std::pin::pin!(engine.ask_stream(query)?);
 
   let mut buffered_text = String::new();
@@ -459,6 +499,12 @@ async fn run_ask(
       }
       semquery_core::AskEvent::AnswerComplete { answer: a, .. } => {
         answer = Some(a);
+      }
+      semquery_core::AskEvent::ModelDownloadStart { repo_id, filename, .. } => {
+        eprintln!("Downloading model {repo_id}/{filename} ...");
+      }
+      semquery_core::AskEvent::ModelDownloadComplete { elapsed_ms, .. } => {
+        eprintln!("Model downloaded in {elapsed_ms} ms");
       }
       _ => {}
     }

@@ -155,7 +155,7 @@ Override it with `--config`.
 
 ## 📥 First-use downloads
 
-The first time you index, search, or ask, `semq` downloads the required local models to `--model-cache` (`~/.cache/semq/models` by default). After that, everything works offline.
+Models are loaded lazily: each command (`index`, `search`, `ask`) downloads only the models it needs, on first use, to `--model-cache` (`~/.cache/semq/models` by default) — download progress is printed to stderr. After that, everything works offline.
 
 ## 🎮 GPU acceleration
 

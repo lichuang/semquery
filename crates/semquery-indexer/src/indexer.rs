@@ -10,6 +10,7 @@ use semquery_core::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::sync::OnceCell;
 use tokio::sync::mpsc::{self, Sender};
 use tokio_stream::Stream;
 use tokio_stream::StreamExt;
@@ -67,7 +68,10 @@ fn sha256_hex(s: &str) -> String {
 
 pub struct IndexerConfig {
   pub chunker: Arc<dyn Chunker>,
-  pub embedder: Arc<dyn Embedder>,
+  /// Lazily-loaded embedder, shared with the engine. The engine fills the
+  /// cell (eagerly today, on first index use after the lazy-loading
+  /// refactor); the indexer only reads it.
+  pub embedder: Arc<OnceCell<Arc<dyn Embedder>>>,
   pub segmenter: Arc<dyn WordSegmenter>,
   pub storage: Arc<dyn Storage>,
   pub readers: ReaderRegistry,
@@ -80,7 +84,7 @@ pub struct IndexerConfig {
 #[derive(Clone)]
 pub struct Indexer {
   chunker: Arc<dyn Chunker>,
-  embedder: Arc<dyn Embedder>,
+  embedder: Arc<OnceCell<Arc<dyn Embedder>>>,
   segmenter: Arc<dyn WordSegmenter>,
   storage: Arc<dyn Storage>,
   readers: ReaderRegistry,
@@ -508,7 +512,11 @@ impl Indexer {
     if !send_event(tx, IndexEvent::EmbeddingBatch { count: all_texts.len() }).await {
       return Ok(IndexStats::default());
     }
-    let all_embeddings = self.embedder.embed(&all_texts).await?;
+    let embedder = self.embedder.get().ok_or(semquery_core::ModelError::NotLoaded {
+      component: "embedder",
+      opener: "Engine::open",
+    })?;
+    let all_embeddings = embedder.embed(&all_texts).await?;
     if !send_event(tx, IndexEvent::WritingStore).await {
       return Ok(IndexStats::default());
     }
@@ -587,6 +595,10 @@ mod tests {
     assert_eq!(serde_json::from_str::<IndexEvent>(&json).unwrap(), event);
   }
 
+  fn stub_embedder_cell() -> Arc<OnceCell<Arc<dyn Embedder>>> {
+    Arc::new(OnceCell::from(Arc::new(StubEmbedder { dim: 512 }) as Arc<dyn Embedder>))
+  }
+
   struct StubEmbedder {
     dim: usize,
   }
@@ -650,7 +662,7 @@ mod tests {
     let (chunk_size, chunk_overlap) = test_indexing_config();
     Indexer::new(IndexerConfig {
       chunker: Arc::new(StubChunker),
-      embedder: Arc::new(StubEmbedder { dim: 512 }),
+      embedder: stub_embedder_cell(),
       segmenter: Arc::new(JiebaSegmenter),
       storage: Arc::new(storage),
       readers: test_readers(),
@@ -736,7 +748,7 @@ mod tests {
     let storage: Arc<dyn Storage> = Arc::new(test_storage());
     let indexer = Indexer::new(IndexerConfig {
       chunker: Arc::new(StubChunker),
-      embedder: Arc::new(StubEmbedder { dim: 512 }),
+      embedder: stub_embedder_cell(),
       segmenter: Arc::new(JiebaSegmenter),
       storage: storage.clone(),
       readers: test_readers(),
@@ -753,7 +765,7 @@ mod tests {
 
     let indexer2 = Indexer::new(IndexerConfig {
       chunker: Arc::new(StubChunker),
-      embedder: Arc::new(StubEmbedder { dim: 512 }),
+      embedder: stub_embedder_cell(),
       segmenter: Arc::new(JiebaSegmenter),
       storage: storage.clone(),
       readers: test_readers(),
@@ -779,7 +791,7 @@ mod tests {
     let storage = Arc::new(test_storage());
     let indexer = Indexer::new(IndexerConfig {
       chunker: Arc::new(StubChunker),
-      embedder: Arc::new(StubEmbedder { dim: 512 }),
+      embedder: stub_embedder_cell(),
       segmenter: Arc::new(JiebaSegmenter),
       storage: storage.clone(),
       readers: test_readers(),
@@ -812,7 +824,7 @@ mod tests {
     };
     let indexer_v1 = Indexer::new(IndexerConfig {
       chunker: Arc::new(StubChunker),
-      embedder: Arc::new(StubEmbedder { dim: 512 }),
+      embedder: stub_embedder_cell(),
       segmenter: Arc::new(JiebaSegmenter),
       storage: storage.clone(),
       readers: test_readers(),
@@ -836,7 +848,7 @@ mod tests {
     };
     let indexer_v2 = Indexer::new(IndexerConfig {
       chunker: Arc::new(StubChunker),
-      embedder: Arc::new(StubEmbedder { dim: 512 }),
+      embedder: stub_embedder_cell(),
       segmenter: Arc::new(JiebaSegmenter),
       storage: storage.clone(),
       readers: test_readers(),

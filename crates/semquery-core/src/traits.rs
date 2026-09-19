@@ -140,6 +140,26 @@ pub enum IndexEvent {
     chunks: usize,
   },
 
+  /// A model file needs downloading from the model hub (not yet cached).
+  /// Emitted as the first events of a lazy index stream, before any retrieval
+  /// of an already-built index happens.
+  ModelDownloadStart {
+    /// Which model role this file belongs to.
+    role: ModelRole,
+    /// HuggingFace repo id, e.g. `BAAI/bge-small-zh-v1.5`.
+    repo_id: String,
+    /// File within the repo.
+    filename: String,
+  },
+
+  /// A model file download finished.
+  ModelDownloadComplete {
+    /// Which model role this file belongs to.
+    role: ModelRole,
+    /// Wall time of the download, in milliseconds.
+    elapsed_ms: u64,
+  },
+
   /// A batch of chunks is being embedded.
   EmbeddingBatch {
     /// Number of chunks in this batch.

@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use semquery_core::{
   Chunker, Collection, Embedder, EngineStatus, IndexEvent, Llm, LlmConfig, ModelRole, ModelSpec, Reranker, Result,
@@ -17,7 +18,11 @@ use semquery_indexer::{
 };
 use semquery_model::{FastEmbedEmbedder, FastEmbedReranker, GgufLlm, ModelHub};
 use semquery_retrieve::{Retriever, RetrieverConfig};
+use tokio::sync::OnceCell;
+use tokio::sync::mpsc;
 use tokio_stream::Stream;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::config::{DocqConfig, RetrievalConfig};
 use semquery_storage::SqliteStorage;
@@ -30,11 +35,23 @@ pub struct EngineConfig {
   pub verbose: Verbose,
 }
 
+/// Internal download-progress signal, mapped to the concrete event type
+/// (`IndexEvent` / `SearchEvent` / `AskEvent`) by each streaming API.
+enum DownloadPhase {
+  Start,
+  Complete { elapsed_ms: u64 },
+}
+
 /// Pre-built components for `Engine::new` (dependency injection).
-/// Tests construct this with stub implementations; `Engine::open_for_*`
-/// constructs it with real model backends loaded on demand.
+/// Tests construct this with stub implementations; production code uses
+/// [`Engine::open`] and lazy loading instead.
 pub struct EngineComponents {
   pub storage: Arc<dyn Storage>,
+  /// Model hub + config are kept so the engine can lazily load models on
+  /// first use (see the lazy-loading refactor); `Engine::new` pre-fills the
+  /// OnceCells below from these components.
+  pub hub: ModelHub,
+  pub config: DocqConfig,
   pub chunker: Arc<dyn Chunker>,
   pub embedder: Arc<dyn Embedder>,
   pub segmenter: Arc<dyn WordSegmenter>,
@@ -50,7 +67,15 @@ pub struct EngineComponents {
 
 pub struct Engine {
   storage: Arc<dyn Storage>,
-  indexer: Option<Indexer>,
+  hub: ModelHub,
+  config: DocqConfig,
+  embedder: Arc<OnceCell<Arc<dyn Embedder>>>,
+  reranker: Arc<OnceCell<Arc<dyn Reranker>>>,
+  llm: Arc<OnceCell<Arc<dyn Llm>>>,
+  /// Tokenizer-backed chunker, produced alongside the embedder (the chunker's
+  /// tokenizer file lives in the embedding model repo).
+  chunker: Arc<OnceCell<Arc<dyn Chunker>>>,
+  indexer: Option<Arc<Indexer>>,
   retriever: Option<Arc<Retriever>>,
   synthesizer: Option<Synthesizer>,
   verbose: Verbose,
@@ -60,6 +85,8 @@ impl Engine {
   pub fn new(components: EngineComponents) -> Self {
     let EngineComponents {
       storage,
+      hub,
+      config,
       chunker,
       embedder,
       segmenter,
@@ -73,9 +100,18 @@ impl Engine {
       chunk_overlap,
     } = components;
 
+    // Wrap the injected models in shareable OnceCells: the engine keeps one
+    // handle and each downstream component (indexer / retriever /
+    // synthesizer) gets a clone, so later steps can drive loading from the
+    // stream layer and have every component see the same instance.
+    let embedder_cell = Arc::new(OnceCell::from(embedder));
+    let reranker_cell = reranker.map(|r| Arc::new(OnceCell::from(r)));
+    let llm_cell = llm.map(|l| Arc::new(OnceCell::from(l)));
+    let chunker_cell = Arc::new(OnceCell::from(chunker.clone()));
+
     let indexer = Indexer::new(IndexerConfig {
       chunker,
-      embedder: embedder.clone(),
+      embedder: embedder_cell.clone(),
       segmenter: segmenter.clone(),
       storage: storage.clone(),
       readers,
@@ -87,9 +123,9 @@ impl Engine {
 
     let retriever = Arc::new(Retriever::new(RetrieverConfig {
       storage: storage.clone(),
-      embedder,
+      embedder: embedder_cell.clone(),
       segmenter,
-      reranker,
+      reranker: reranker_cell.clone(),
       bm25_top_k: retrieval.bm25_top_k,
       vector_top_k: retrieval.vector_top_k,
       rrf_k: retrieval.rrf_k,
@@ -97,17 +133,23 @@ impl Engine {
       verbose,
     }));
 
-    let synthesizer = llm.map(|llm| {
+    let synthesizer = llm_cell.clone().map(|cell| {
       Synthesizer::new(SynthesizerConfig {
         retriever: retriever.clone(),
-        llm,
+        llm: cell,
         verbose,
       })
     });
 
     Self {
       storage,
-      indexer: Some(indexer),
+      hub,
+      config,
+      embedder: embedder_cell,
+      reranker: reranker_cell.unwrap_or_else(|| Arc::new(OnceCell::new())),
+      llm: llm_cell.unwrap_or_else(|| Arc::new(OnceCell::new())),
+      chunker: chunker_cell,
+      indexer: Some(Arc::new(indexer)),
       retriever: Some(retriever),
       synthesizer,
       verbose,
@@ -156,162 +198,32 @@ impl Engine {
     )))
   }
 
-  async fn load_embedding(
-    hub: &ModelHub,
-    storage: &dyn Storage,
-    spec: &ModelSpec,
-    tokenizer_filename: &str,
-    indexing: &crate::config::IndexingConfig,
-  ) -> Result<(Arc<dyn Embedder>, Arc<dyn Chunker>)> {
-    hub.ensure(spec, storage).await?;
-    let embedder = Arc::new(FastEmbedEmbedder::from_model_hub(hub, spec).await?);
-    let chunker = Self::build_chunker(hub, spec, tokenizer_filename, indexing).await?;
-    Ok((embedder, chunker))
-  }
+  // ---- Open methods ----
 
-  async fn load_reranker(hub: &ModelHub, storage: &dyn Storage, spec: &ModelSpec) -> Result<Arc<dyn Reranker>> {
-    hub.ensure(spec, storage).await?;
-    Ok(Arc::new(FastEmbedReranker::from_model_hub(hub, spec).await?))
-  }
-
-  fn load_reranker_sync(
-    hub: ModelHub,
-    storage: Arc<dyn Storage>,
-    spec: ModelSpec,
-    verbose: Verbose,
-  ) -> Result<Arc<dyn Reranker>> {
-    let _step = verbose.start("load reranker model");
-    hub.ensure_sync(&spec, storage.as_ref())?;
-    Ok(Arc::new(FastEmbedReranker::from_model_hub_sync(&hub, &spec)?))
-  }
-
-  fn load_llm_sync(
-    hub: ModelHub,
-    storage: Arc<dyn Storage>,
-    spec: ModelSpec,
-    llm_config: LlmConfig,
-    verbose: Verbose,
-  ) -> Result<Arc<dyn Llm>> {
-    let _step = verbose.start("load LLM");
-    hub.ensure_sync(&spec, storage.as_ref())?;
-    Ok(Arc::new(GgufLlm::from_model_hub_sync(&hub, &spec, &llm_config)?))
-  }
-
-  // ---- On-demand open methods ----
-
-  /// Open for indexing: loads embedding model only (~100 MB).
-  pub async fn open_for_index(config: EngineConfig) -> Result<Self> {
-    let (components, _) = Self::build_index_components(&config).await?;
-    Ok(Self::new(components))
-  }
-
-  /// Open for search: loads embedding + reranker models (~1.1 GB).
-  pub async fn open_for_search(config: EngineConfig) -> Result<Self> {
-    let (components, _) = Self::build_search_components(&config).await?;
-    Ok(Self::new(components))
-  }
-
-  /// Open for ask: loads all models (~6 GB).
-  pub async fn open_for_ask(config: EngineConfig) -> Result<Self> {
-    let (components, _) = Self::build_ask_components(&config).await?;
-    Ok(Self::new(components))
-  }
-
-  /// Open for storage-level operations only: no models are loaded, no network
-  /// access, no model-cache resolution. Supports `status`, `list_collections`,
-  /// `add_collection`, `remove_collection`, etc. Model-backed operations
-  /// (`index`, `search`, `ask`) return a `ModelError::NotLoaded` error until the
-  /// engine is reopened with `open_for_index` / `open_for_search` / `open_for_ask`.
-  pub fn open_data_only(config: EngineConfig) -> Result<Self> {
+  /// Open an engine without loading any models: no network access, no
+  /// model-cache resolution. This is the canonical entry point —
+  /// storage-level operations (`status`, `list_collections`,
+  /// `add_collection`, `remove_collection`) work immediately, and
+  /// model-backed operations (`index`, `search`, `ask`, plus their streaming
+  /// variants) lazily load the models they need on first use, emitting
+  /// `ModelDownloadStart` / `ModelDownloadComplete` events when a model file
+  /// actually hits the network.
+  pub fn open(config: EngineConfig) -> Result<Self> {
     let storage = Self::open_storage(&config.workspace_path)?;
     storage.init(0)?;
     Ok(Self {
       storage,
+      hub: ModelHub::new(config.model_cache_dir.clone()),
+      config: config.config.clone(),
+      embedder: Arc::new(OnceCell::new()),
+      reranker: Arc::new(OnceCell::new()),
+      llm: Arc::new(OnceCell::new()),
+      chunker: Arc::new(OnceCell::new()),
       indexer: None,
       retriever: None,
       synthesizer: None,
       verbose: config.verbose,
     })
-  }
-
-  async fn build_index_components(engine_config: &EngineConfig) -> Result<(EngineComponents, ModelHub)> {
-    let hub = ModelHub::new(engine_config.model_cache_dir.clone());
-    let storage = Self::open_storage(&engine_config.workspace_path)?;
-    let emb_spec = engine_config.config.models.embedding.to_spec(ModelRole::Embedding);
-    let tokenizer_filename = engine_config.config.models.embedding.tokenizer_filename.clone();
-    let (embedder, chunker) = {
-      let _step = engine_config.verbose.start("load embedding model");
-      Self::load_embedding(
-        &hub,
-        storage.as_ref(),
-        &emb_spec,
-        &tokenizer_filename,
-        &engine_config.config.indexing,
-      )
-      .await?
-    };
-    storage.init(embedder.dimension())?;
-
-    let components = EngineComponents {
-      storage,
-      chunker,
-      embedder,
-      segmenter: Arc::new(JiebaSegmenter),
-      reranker: None,
-      llm: None,
-      readers: Self::default_readers(),
-      retrieval: engine_config.config.retrieval.clone(),
-      verbose: engine_config.verbose,
-      embedding_spec: emb_spec,
-      chunk_size: engine_config.config.indexing.chunk_size,
-      chunk_overlap: engine_config.config.indexing.chunk_overlap,
-    };
-
-    Ok((components, hub))
-  }
-
-  async fn build_search_components(engine_config: &EngineConfig) -> Result<(EngineComponents, ModelHub)> {
-    let (mut components, hub) = Self::build_index_components(engine_config).await?;
-    let rerank_spec = engine_config.config.models.reranker.to_spec(ModelRole::Reranker);
-    components.reranker = Some({
-      let _step = engine_config.verbose.start("load reranker model");
-      Self::load_reranker(&hub, components.storage.as_ref(), &rerank_spec).await?
-    });
-
-    Ok((components, hub))
-  }
-
-  async fn build_ask_components(engine_config: &EngineConfig) -> Result<(EngineComponents, ModelHub)> {
-    let (mut components, hub) = Self::build_index_components(engine_config).await?;
-
-    let rerank_spec = engine_config.config.models.reranker.to_spec(ModelRole::Reranker);
-    let llm_spec = engine_config.config.models.llm.to_spec(ModelRole::Chat);
-    let llm_config: LlmConfig = engine_config.config.llm.clone().try_into()?;
-    let storage = components.storage.clone();
-    let verbose = engine_config.verbose;
-
-    // Reranker and LLM are independent; load them in parallel
-    // on blocking threads so their downloads overlap.
-    let rerank_hub = hub.clone();
-    let llm_hub = hub.clone();
-    let rerank_storage = storage.clone();
-    let llm_storage = storage.clone();
-    let rerank_verbose = verbose;
-    let llm_verbose = verbose;
-
-    let (reranker, llm) = tokio::join!(
-      tokio::task::spawn_blocking(move || {
-        Self::load_reranker_sync(rerank_hub, rerank_storage, rerank_spec, rerank_verbose)
-      }),
-      tokio::task::spawn_blocking(move || {
-        Self::load_llm_sync(llm_hub, llm_storage, llm_spec, llm_config, llm_verbose)
-      }),
-    );
-
-    components.reranker = Some(reranker.map_err(|e| semquery_core::ModelError::TaskJoin(e.to_string()))??);
-    components.llm = Some(llm.map_err(|e| semquery_core::ModelError::TaskJoin(e.to_string()))??);
-
-    Ok((components, hub))
   }
 
   pub fn add_collection(&self, name: &str, path: impl AsRef<Path>) -> Result<()> {
@@ -357,13 +269,9 @@ impl Engine {
   }
 
   pub fn index_stream(&self) -> Result<impl Stream<Item = Result<IndexEvent>> + Send + 'static> {
-    let indexer = self.indexer.as_ref().ok_or(semquery_core::ModelError::NotLoaded {
-      component: "indexer",
-      opener: "open_for_index",
-    })?;
     let collections = self.storage.list_collections()?;
     let sources = collections.into_iter().map(|c| (c.name, c.path)).collect();
-    Ok(indexer.clone().index_sources_stream(sources))
+    Ok(self.spawn_index(sources))
   }
 
   pub async fn index_one(&self, name: &str) -> Result<IndexStats> {
@@ -376,49 +284,418 @@ impl Engine {
     name: impl Into<String>,
   ) -> Result<impl Stream<Item = Result<IndexEvent>> + Send + 'static> {
     let name = name.into();
-    let indexer = self.indexer.as_ref().ok_or(semquery_core::ModelError::NotLoaded {
-      component: "indexer",
-      opener: "open_for_index",
-    })?;
     let collections = self.storage.list_collections()?;
     let col = collections.into_iter().find(|c| c.name == name).ok_or(semquery_core::StoreError::NotFound(name))?;
-    Ok(indexer.clone().index_sources_stream(vec![(col.name, col.path)]))
+    Ok(self.spawn_index(vec![(col.name, col.path)]))
   }
 
+  /// Spawn an index pipeline. If the engine was built by `Engine::new` with a
+  /// pre-built indexer, that indexer is used directly; otherwise the embedding
+  /// model (and its tokenizer-backed chunker) is loaded lazily — emitting
+  /// `ModelDownloadStart` / `ModelDownloadComplete` events when a model file
+  /// actually hits the network — and an `Indexer` is constructed on first use.
+  fn spawn_index(&self, sources: Vec<(String, PathBuf)>) -> impl Stream<Item = Result<IndexEvent>> + Send + 'static {
+    let (tx, rx) = mpsc::channel::<Result<IndexEvent>>(32);
+    let indexer = self.indexer.clone();
+    let embedder_cell = self.embedder.clone();
+    let chunker_cell = self.chunker.clone();
+    let hub = self.hub.clone();
+    let config = self.config.clone();
+    let storage = self.storage.clone();
+    let verbose = self.verbose;
+
+    tokio::spawn(async move {
+      let result: Result<()> = async {
+        let indexer = match indexer {
+          Some(indexer) => indexer,
+          None => {
+            let mut emit = |spec: &ModelSpec, phase: DownloadPhase| {
+              let event = match phase {
+                DownloadPhase::Start => IndexEvent::ModelDownloadStart {
+                  role: spec.role,
+                  repo_id: spec.repo_id.clone(),
+                  filename: spec.filename.clone(),
+                },
+                DownloadPhase::Complete { elapsed_ms } => IndexEvent::ModelDownloadComplete {
+                  role: spec.role,
+                  elapsed_ms,
+                },
+              };
+              let _ = tx.try_send(Ok(event));
+            };
+            {
+              let _step = verbose.start("load embedding model");
+              Self::ensure_embedder(&embedder_cell, &hub, &config, storage.as_ref(), &mut emit).await?;
+            }
+            let chunker = {
+              let _step = verbose.start("load tokenizer");
+              Self::ensure_chunker(&chunker_cell, &hub, &config, storage.as_ref(), &mut emit).await?
+            };
+            Arc::new(Indexer::new(IndexerConfig {
+              chunker,
+              embedder: embedder_cell,
+              segmenter: Arc::new(JiebaSegmenter),
+              storage,
+              readers: Self::default_readers(),
+              verbose,
+              embedding_spec: config.models.embedding.to_spec(ModelRole::Embedding),
+              chunk_size: config.indexing.chunk_size,
+              chunk_overlap: config.indexing.chunk_overlap,
+            }))
+          }
+        };
+        let mut stream = std::pin::pin!(indexer.index_sources_stream(sources));
+        while let Some(event) = stream.next().await {
+          if tx.send(event).await.is_err() {
+            return Ok(()); // consumer dropped
+          }
+        }
+        Ok(())
+      }
+      .await;
+      if let Err(e) = result {
+        let _ = tx.send(Err(e)).await;
+      }
+    });
+
+    ReceiverStream::new(rx)
+  }
+
+  /// Lazily load the embedding model into the shared cell. `on_download`
+  /// fires once if the model file actually hits the network (cache hits are
+  /// silent). After this returns, `storage` has been initialized with the
+  /// embedding dimension.
+  async fn ensure_embedder(
+    embedder_cell: &Arc<OnceCell<Arc<dyn Embedder>>>,
+    hub: &ModelHub,
+    config: &DocqConfig,
+    storage: &dyn Storage,
+    mut on_download: impl FnMut(&ModelSpec, DownloadPhase),
+  ) -> Result<Arc<dyn Embedder>> {
+    embedder_cell
+      .get_or_try_init(|| async {
+        let emb_spec = config.models.embedding.to_spec(ModelRole::Embedding);
+        Self::ensure_model_file(hub, storage, &emb_spec, &mut on_download).await?;
+        let embedder: Arc<dyn Embedder> = Arc::new(FastEmbedEmbedder::from_model_hub(hub, &emb_spec).await?);
+        storage.init(embedder.dimension())?;
+        Ok(embedder)
+      })
+      .await
+      .map(Arc::clone)
+  }
+
+  /// Lazily load the tokenizer-backed chunker. Only indexing needs it —
+  /// search/ask must not pay the tokenizer download.
+  async fn ensure_chunker(
+    chunker_cell: &Arc<OnceCell<Arc<dyn Chunker>>>,
+    hub: &ModelHub,
+    config: &DocqConfig,
+    storage: &dyn Storage,
+    mut on_download: impl FnMut(&ModelSpec, DownloadPhase),
+  ) -> Result<Arc<dyn Chunker>> {
+    chunker_cell
+      .get_or_try_init(|| async {
+        let emb_spec = config.models.embedding.to_spec(ModelRole::Embedding);
+        let tokenizer_spec = ModelSpec {
+          role: ModelRole::Tokenizer,
+          repo_id: emb_spec.repo_id.clone(),
+          filename: config.models.embedding.tokenizer_filename.clone(),
+          revision: emb_spec.revision.clone(),
+          checksum: None,
+        };
+        Self::ensure_model_file(hub, storage, &tokenizer_spec, &mut on_download).await?;
+        Self::build_chunker(
+          hub,
+          &emb_spec,
+          &config.models.embedding.tokenizer_filename,
+          &config.indexing,
+        )
+        .await
+      })
+      .await
+      .map(Arc::clone)
+  }
+
+  /// Lazily load the reranker into the shared cell.
+  async fn ensure_reranker(
+    reranker_cell: &Arc<OnceCell<Arc<dyn Reranker>>>,
+    hub: &ModelHub,
+    config: &DocqConfig,
+    storage: &dyn Storage,
+    mut on_download: impl FnMut(&ModelSpec, DownloadPhase),
+  ) -> Result<Arc<dyn Reranker>> {
+    reranker_cell
+      .get_or_try_init(|| async {
+        let spec = config.models.reranker.to_spec(ModelRole::Reranker);
+        Self::ensure_model_file(hub, storage, &spec, &mut on_download).await?;
+        Ok(Arc::new(FastEmbedReranker::from_model_hub(hub, &spec).await?) as Arc<dyn Reranker>)
+      })
+      .await
+      .map(Arc::clone)
+  }
+
+  /// Lazily load the chat LLM into the shared cell.
+  async fn ensure_llm(
+    llm_cell: &Arc<OnceCell<Arc<dyn Llm>>>,
+    hub: &ModelHub,
+    config: &DocqConfig,
+    storage: &dyn Storage,
+    mut on_download: impl FnMut(&ModelSpec, DownloadPhase),
+  ) -> Result<Arc<dyn Llm>> {
+    llm_cell
+      .get_or_try_init(|| async {
+        let spec = config.models.llm.to_spec(ModelRole::Chat);
+        let llm_config: LlmConfig = config.llm.clone().try_into()?;
+        Self::ensure_model_file(hub, storage, &spec, &mut on_download).await?;
+        Ok(Arc::new(GgufLlm::from_model_hub(hub, &spec, &llm_config).await?) as Arc<dyn Llm>)
+      })
+      .await
+      .map(Arc::clone)
+  }
+
+  /// Build a retriever over the shared lazy cells for engines opened with
+  /// `Engine::open` (no pre-built retriever).
+  fn lazy_retriever(
+    storage: Arc<dyn Storage>,
+    embedder_cell: Arc<OnceCell<Arc<dyn Embedder>>>,
+    reranker_cell: Arc<OnceCell<Arc<dyn Reranker>>>,
+    retrieval: &RetrievalConfig,
+    verbose: Verbose,
+  ) -> Retriever {
+    Retriever::new(RetrieverConfig {
+      storage,
+      embedder: embedder_cell,
+      segmenter: Arc::new(JiebaSegmenter),
+      reranker: Some(reranker_cell),
+      bm25_top_k: retrieval.bm25_top_k,
+      vector_top_k: retrieval.vector_top_k,
+      rrf_k: retrieval.rrf_k,
+      rerank_top_n: retrieval.rerank_top_n,
+      verbose,
+    })
+  }
+
+  /// Resolve a model file, emitting download events only when the file is not
+  /// already in the local cache. Records the model version either way.
+  async fn ensure_model_file(
+    hub: &ModelHub,
+    storage: &dyn Storage,
+    spec: &ModelSpec,
+    on_download: &mut impl FnMut(&ModelSpec, DownloadPhase),
+  ) -> Result<()> {
+    if hub.is_cached(spec) {
+      return hub.ensure(spec, storage).await.map(|_| ());
+    }
+    on_download(spec, DownloadPhase::Start);
+    let start = Instant::now();
+    hub.ensure(spec, storage).await?;
+    on_download(
+      spec,
+      DownloadPhase::Complete {
+        elapsed_ms: start.elapsed().as_millis() as u64,
+      },
+    );
+    Ok(())
+  }
+
+  /// Search for passages. Drives the same lazy-loading stream as
+  /// [`Engine::search_stream`] and returns the final hit list.
   pub async fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>> {
-    let retriever = self.retriever.as_ref().ok_or(semquery_core::ModelError::NotLoaded {
-      component: "retriever",
-      opener: "open_for_search",
-    })?;
-    retriever.search(query, top_k).await
+    let mut stream = std::pin::pin!(self.spawn_search(query.to_string(), top_k));
+    let mut hits = Vec::new();
+    while let Some(event) = stream.next().await {
+      if let SearchEvent::Completed { hits: final_hits, .. } = event? {
+        hits = final_hits;
+      }
+    }
+    Ok(hits)
   }
 
+  /// Streaming variant of [`Engine::search`]: model download events (first
+  /// use, uncached) followed by retrieval stage events, terminated by
+  /// `Completed`.
   pub fn search_stream(
     &self,
     query: impl Into<String>,
     top_k: usize,
   ) -> Result<impl Stream<Item = Result<SearchEvent>> + Send + 'static> {
-    let retriever = self.retriever.as_ref().ok_or(semquery_core::ModelError::NotLoaded {
-      component: "retriever",
-      opener: "open_for_search",
-    })?;
-    Ok(retriever.clone().search_stream(query, top_k))
+    Ok(self.spawn_search(query.into(), top_k))
   }
 
+  /// Spawn a search pipeline. Engines built by `Engine::new` reuse their
+  /// pre-built retriever; engines from `Engine::open` lazily load the
+  /// embedder + reranker (emitting download events when a file actually hits
+  /// the network) and construct a retriever on first use.
+  fn spawn_search(&self, query: String, top_k: usize) -> impl Stream<Item = Result<SearchEvent>> + Send + 'static {
+    let (tx, rx) = mpsc::channel::<Result<SearchEvent>>(32);
+    let retriever = self.retriever.clone();
+    let embedder_cell = self.embedder.clone();
+    let reranker_cell = self.reranker.clone();
+    let hub = self.hub.clone();
+    let config = self.config.clone();
+    let storage = self.storage.clone();
+    let verbose = self.verbose;
+
+    tokio::spawn(async move {
+      let result: Result<()> = async {
+        let retriever = match retriever {
+          Some(retriever) => retriever,
+          None => {
+            let mut emit = |spec: &ModelSpec, phase: DownloadPhase| {
+              let event = match phase {
+                DownloadPhase::Start => SearchEvent::ModelDownloadStart {
+                  role: spec.role,
+                  repo_id: spec.repo_id.clone(),
+                  filename: spec.filename.clone(),
+                },
+                DownloadPhase::Complete { elapsed_ms } => SearchEvent::ModelDownloadComplete {
+                  role: spec.role,
+                  elapsed_ms,
+                },
+              };
+              let _ = tx.try_send(Ok(event));
+            };
+            {
+              let _step = verbose.start("load embedding model");
+              Self::ensure_embedder(&embedder_cell, &hub, &config, storage.as_ref(), &mut emit).await?;
+            }
+            {
+              let _step = verbose.start("load reranker model");
+              Self::ensure_reranker(&reranker_cell, &hub, &config, storage.as_ref(), &mut emit).await?;
+            }
+            Arc::new(Self::lazy_retriever(
+              storage,
+              embedder_cell,
+              reranker_cell,
+              &config.retrieval,
+              verbose,
+            ))
+          }
+        };
+        let mut stream = std::pin::pin!(retriever.search_stream(query, top_k));
+        while let Some(event) = stream.next().await {
+          if tx.send(event).await.is_err() {
+            return Ok(()); // consumer dropped
+          }
+        }
+        Ok(())
+      }
+      .await;
+      if let Err(e) = result {
+        let _ = tx.send(Err(e)).await;
+      }
+    });
+
+    ReceiverStream::new(rx)
+  }
+
+  /// Ask a question and get a cited answer. Drives the same lazy-loading
+  /// stream as [`Engine::ask_stream`] and returns the terminal answer.
   pub async fn ask(&self, query: &str) -> Result<semquery_core::Answer> {
-    let synth = self.synthesizer.as_ref().ok_or(semquery_core::LlmError::NotLoaded)?;
-    synth.ask(query).await
+    let mut stream = std::pin::pin!(self.spawn_ask(query.to_string()));
+    let mut answer = None;
+    while let Some(event) = stream.next().await {
+      if let semquery_core::AskEvent::AnswerComplete { answer: a, .. } = event? {
+        answer = Some(a);
+      }
+    }
+    answer.ok_or_else(|| semquery_core::SynthError::Other("ask stream ended without AnswerComplete".into()).into())
   }
 
-  /// Streaming variant of [`Engine::ask`]: retrieval stage events, then each
-  /// LLM token as it is decoded, terminated by `AnswerComplete`.
+  /// Streaming variant of [`Engine::ask`]: model download events (first use,
+  /// uncached), then retrieval stage events, then each LLM token as it is
+  /// decoded, terminated by `AnswerComplete`.
   pub fn ask_stream(
     &self,
     query: impl Into<String>,
   ) -> Result<impl Stream<Item = std::result::Result<semquery_core::AskEvent, semquery_core::DocqError>> + Send + 'static>
   {
-    let synth = self.synthesizer.as_ref().ok_or(semquery_core::LlmError::NotLoaded)?;
-    Ok(synth.ask_stream(query))
+    Ok(self.spawn_ask(query.into()))
+  }
+
+  /// Spawn an ask pipeline. Engines built by `Engine::new` reuse their
+  /// pre-built synthesizer; engines from `Engine::open` lazily load
+  /// embedder + reranker + LLM (emitting download events when a file
+  /// actually hits the network) and construct the retriever + synthesizer on
+  /// first use.
+  fn spawn_ask(
+    &self,
+    query: String,
+  ) -> impl Stream<Item = std::result::Result<semquery_core::AskEvent, semquery_core::DocqError>> + Send + 'static {
+    let (tx, rx) = mpsc::channel::<std::result::Result<semquery_core::AskEvent, semquery_core::DocqError>>(32);
+    let synthesizer = self.synthesizer.clone();
+    let retriever = self.retriever.clone();
+    let embedder_cell = self.embedder.clone();
+    let reranker_cell = self.reranker.clone();
+    let llm_cell = self.llm.clone();
+    let hub = self.hub.clone();
+    let config = self.config.clone();
+    let storage = self.storage.clone();
+    let verbose = self.verbose;
+
+    tokio::spawn(async move {
+      let result: Result<()> = async {
+        let synthesizer = match synthesizer {
+          Some(synthesizer) => synthesizer,
+          None => {
+            let mut emit = |spec: &ModelSpec, phase: DownloadPhase| {
+              let event = match phase {
+                DownloadPhase::Start => semquery_core::AskEvent::ModelDownloadStart {
+                  role: spec.role,
+                  repo_id: spec.repo_id.clone(),
+                  filename: spec.filename.clone(),
+                },
+                DownloadPhase::Complete { elapsed_ms } => semquery_core::AskEvent::ModelDownloadComplete {
+                  role: spec.role,
+                  elapsed_ms,
+                },
+              };
+              let _ = tx.try_send(Ok(event));
+            };
+            {
+              let _step = verbose.start("load embedding model");
+              Self::ensure_embedder(&embedder_cell, &hub, &config, storage.as_ref(), &mut emit).await?;
+            }
+            {
+              let _step = verbose.start("load reranker model");
+              Self::ensure_reranker(&reranker_cell, &hub, &config, storage.as_ref(), &mut emit).await?;
+            }
+            {
+              let _step = verbose.start("load LLM");
+              Self::ensure_llm(&llm_cell, &hub, &config, storage.as_ref(), &mut emit).await?;
+            }
+            let retriever = match retriever {
+              Some(retriever) => retriever,
+              None => Arc::new(Self::lazy_retriever(
+                storage,
+                embedder_cell,
+                reranker_cell,
+                &config.retrieval,
+                verbose,
+              )),
+            };
+            Synthesizer::new(SynthesizerConfig {
+              retriever,
+              llm: llm_cell,
+              verbose,
+            })
+          }
+        };
+        let mut stream = std::pin::pin!(synthesizer.ask_stream(query));
+        while let Some(event) = stream.next().await {
+          if tx.send(event).await.is_err() {
+            return Ok(()); // consumer dropped
+          }
+        }
+        Ok(())
+      }
+      .await;
+      if let Err(e) = result {
+        let _ = tx.send(Err(e)).await;
+      }
+    });
+
+    ReceiverStream::new(rx)
   }
 
   pub fn status(&self) -> Result<EngineStatus> {
@@ -509,6 +786,8 @@ mod tests {
   fn test_components(storage: Arc<dyn Storage>) -> EngineComponents {
     EngineComponents {
       storage,
+      hub: ModelHub::new(std::env::temp_dir().join("semq-test-model-cache")),
+      config: crate::config::DocqConfig::default(),
       chunker: Arc::new(StubChunker),
       embedder: Arc::new(StubEmbedder { dim: 512 }),
       segmenter: Arc::new(JiebaSegmenter),
@@ -661,15 +940,20 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_open_data_only_loads_no_models() {
+  async fn test_engine_open_loads_no_models() {
     let tmp = TempDir::new().unwrap();
+    // Point the embedding model at a repo that cannot exist so the lazy load
+    // triggered by index() fails fast (404 / DNS error) instead of
+    // downloading a real model in a unit test.
+    let mut docq_config = crate::config::DocqConfig::default();
+    docq_config.models.embedding.repo_id = "nonexistent/repo".into();
     let config = EngineConfig {
       workspace_path: tmp.path().to_path_buf(),
       model_cache_dir: tmp.path().join("models"),
-      config: crate::config::DocqConfig::default(),
+      config: docq_config,
       verbose: Verbose(false),
     };
-    let engine = Engine::open_data_only(config).unwrap();
+    let engine = Engine::open(config).unwrap();
 
     // Storage-level operations work without any model.
     let notes_dir = TempDir::new().unwrap();
@@ -678,12 +962,91 @@ mod tests {
     assert_eq!(status.collections.len(), 1);
     assert_eq!(status.collections[0].name, "notes");
 
-    // Model-backed operations fail with a clear NotLoaded error.
-    assert!(engine.index().await.is_err());
+    // index() drives lazy loading on an `open` engine: the stream emits a
+    // ModelDownloadStart event and then fails because the model is unfetchable.
+    let mut stream = std::pin::pin!(engine.index_stream().unwrap());
+    let mut saw_download_start = false;
+    let mut failed = false;
+    while let Some(event) = stream.next().await {
+      match event {
+        Ok(IndexEvent::ModelDownloadStart { role, .. }) => {
+          assert_eq!(role, semquery_core::ModelRole::Embedding);
+          saw_download_start = true;
+        }
+        Ok(_) => {}
+        Err(_) => {
+          failed = true;
+          break;
+        }
+      }
+    }
+    assert!(saw_download_start, "lazy index must emit a download-start event first");
+    assert!(
+      failed,
+      "lazy index must fail when the embedding model cannot be fetched"
+    );
+
+    // Retrieval / ask are lazy too: they attempt to load the (unfetchable)
+    // embedding model and fail inside the stream.
     assert!(engine.search("生日", 5).await.is_err());
-    assert!(engine.search_stream("生日", 5).is_err());
+    let mut search_stream = std::pin::pin!(engine.search_stream("生日", 5).unwrap());
+    let mut search_failed = false;
+    while let Some(event) = search_stream.next().await {
+      if event.is_err() {
+        search_failed = true;
+        break;
+      }
+    }
+    assert!(search_failed, "lazy search must fail when the model cannot be fetched");
     assert!(engine.ask("生日").await.is_err());
-    assert!(engine.ask_stream("生日").is_err());
+    let mut ask_stream = std::pin::pin!(engine.ask_stream("生日").unwrap());
+    let mut ask_failed = false;
+    while let Some(event) = ask_stream.next().await {
+      if event.is_err() {
+        ask_failed = true;
+        break;
+      }
+    }
+    assert!(ask_failed, "lazy ask must fail when the model cannot be fetched");
+  }
+
+  #[tokio::test]
+  async fn test_open_engine_lazy_index_with_cached_models() {
+    let tmp = TempDir::new().unwrap();
+    let engine = Engine::open(EngineConfig {
+      workspace_path: tmp.path().to_path_buf(),
+      model_cache_dir: tmp.path().join("models"),
+      config: crate::config::DocqConfig::default(),
+      verbose: Verbose(false),
+    })
+    .unwrap();
+
+    // Simulate models that are already available: pre-fill the lazy cells
+    // (tests live inside the engine module, so private fields are reachable)
+    // and initialize the vector table with the stub dimension.
+    engine.storage.init(512).unwrap();
+    assert!(engine.embedder.set(Arc::new(StubEmbedder { dim: 512 }) as Arc<dyn Embedder>).is_ok());
+    assert!(engine.chunker.set(Arc::new(StubChunker)).is_ok());
+
+    let notes_dir = TempDir::new().unwrap();
+    std::fs::write(notes_dir.path().join("note.txt"), "今天是我的生日").unwrap();
+    engine.add_collection("notes", notes_dir.path()).unwrap();
+
+    let mut stream = std::pin::pin!(engine.index_stream().unwrap());
+    let mut completed = None;
+    let mut download_events = 0;
+    while let Some(event) = stream.next().await {
+      match event.unwrap() {
+        IndexEvent::Complete { files, chunks, .. } => completed = Some((files, chunks)),
+        IndexEvent::ModelDownloadStart { .. } | IndexEvent::ModelDownloadComplete { .. } => download_events += 1,
+        _ => {}
+      }
+    }
+
+    let (files, chunks) = completed.expect("lazy index must complete");
+    assert_eq!(files, 1);
+    assert!(chunks > 0);
+    assert_eq!(download_events, 0, "cached models must not emit download events");
   }
 
   #[tokio::test]
@@ -692,7 +1055,7 @@ mod tests {
 
     // Phase 1: data-only open — manages collections without any model.
     {
-      let engine = Engine::open_data_only(EngineConfig {
+      let engine = Engine::open(EngineConfig {
         workspace_path: tmp.path().to_path_buf(),
         model_cache_dir: tmp.path().join("models"),
         config: crate::config::DocqConfig::default(),
@@ -705,9 +1068,9 @@ mod tests {
     }
 
     // Phase 2: reopen the same workspace for model-backed use. This mirrors
-    // what open_for_index does once the embedding dimension is known:
-    // open storage + init(dimension). It must not hit SchemaMismatch from
-    // the earlier init(0), and data written in phase 1 must survive.
+    // what lazy loading does once the embedding dimension is known: open
+    // storage + init(dimension). It must not hit SchemaMismatch from the
+    // earlier init(0), and data written in phase 1 must survive.
     let storage = SqliteStorage::open_workspace(tmp.path()).unwrap();
     storage.init(512).unwrap();
     let collections = storage.list_collections().unwrap();
@@ -732,9 +1095,9 @@ mod tests {
       assert!(stats.chunks_indexed > 0);
     }
 
-    // Phase 2: reopen data-only — indexed data must be intact and readable.
+    // Phase 2: reopen via the canonical `open` — indexed data must be intact and readable.
     {
-      let engine = Engine::open_data_only(EngineConfig {
+      let engine = Engine::open(EngineConfig {
         workspace_path: tmp.path().to_path_buf(),
         model_cache_dir: tmp.path().join("models"),
         config: crate::config::DocqConfig::default(),
@@ -759,8 +1122,16 @@ mod tests {
   async fn test_engine_ask_without_llm_errors() {
     let tmp = TempDir::new().unwrap();
     let storage = test_storage(&tmp);
+    // No LLM injected: ask() falls back to lazy loading, which must fail
+    // fast. Point reranker/llm at repos that cannot exist so no real
+    // download is attempted (the embedder cell is pre-filled with a stub).
+    let mut docq_config = crate::config::DocqConfig::default();
+    docq_config.models.reranker.repo_id = "nonexistent/repo".into();
+    docq_config.models.llm.repo_id = "nonexistent/repo".into();
     let components = EngineComponents {
       storage,
+      hub: ModelHub::new(std::env::temp_dir().join("semq-test-model-cache")),
+      config: docq_config,
       chunker: Arc::new(StubChunker),
       embedder: Arc::new(StubEmbedder { dim: 512 }),
       segmenter: Arc::new(JiebaSegmenter),

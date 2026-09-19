@@ -255,3 +255,76 @@
 - 目标：为 macOS / Linux / Windows 提供预编译二进制，降低安装门槛。
 - 当前状态：CI 只发布 CPU 版本，GPU 版本需要用户从源码编译。
 - 后续：参考 P4-30，增加多平台 GPU 加速二进制（Metal / Vulkan / CUDA）。
+
+## 八、架构重构：模型懒加载（方案 C）✅ 已全部完成（Step 1-6）
+
+> 目标：收敛 `open_for_index / open_for_search / open_for_ask / open_data_only` 四个入口为**一个**纯数据入口 `Engine::open`，模型改为首次使用流时按需加载；模型下载作为流的**第一批事件**发出，时序天然正确。为 MCP server（R-1）铺路。
+
+### 背景与动机
+
+- 当前四个 `open_for_*` 让调用方预先声明用哪些模型，是实现细节泄漏到 API。
+- 模型下载发生在 `open_for_*` 阶段，`IndexEvent` 流尚未创建，下载阶段不可观测。
+- `open_data_only` 已经把 `indexer`/`retriever` 改成 `Option`，本次重构顺水推舟把 Option 换成 OnceCell。
+- 核心机制：每个模型组件一个 `tokio::sync::OnceCell`，并发调用共享同一次加载；无新依赖。
+
+### 步骤划分（每步独立可编译、可测试、可提交）
+
+#### Step 1 — Engine 组件 OnceCell 化 ✅ 已完成
+
+- `Engine` 持有 `embedder: OnceCell<Arc<dyn Embedder>>`、`reranker: OnceCell<Arc<dyn Reranker>>`、`llm: OnceCell<Arc<dyn Llm>>`，同时保留 `ModelHub` 和 `DocqConfig` 字段供懒加载使用。
+- 保留 `Engine::new(components)` 作为测试 / 依赖注入入口：预填充 OnceCell（`OnceCell::from(...)`），现有测试基本不动。
+- `EngineComponents` 相应增加 `hub` / `config` 两个字段；`open_data_only` 留下空 OnceCell。
+- 备注：新字段在 Step 4/5 才有读取方，Step 1 加了 scoped `#[allow(dead_code)]`（带注释），首个读取方落地后移除。
+- 验收：编译通过，`cargo test --workspace` 全绿。
+
+#### Step 2 — 新增 `Engine::open(config)`（纯数据入口）✅ 已完成
+
+- 只开 storage + `init(0)`，不加载任何模型。备注：`open_data_only` 曾作为兼容别名保留，Step 6 时已按「`open` 完全覆盖」移除。
+- data-only 系列测试切到 `open`，别名由 `test_data_only_then_reopen_with_models` 的 Phase 1 继续覆盖。
+- 验收：`status` / `add_collection` 等存储级操作零模型、零网络可用。
+
+#### Step 3 — Indexer / Retriever / Synthesizer 解除构造期模型依赖 ✅ 已完成
+
+- 三组件不再持有模型本体，改为持有 `Arc<OnceCell<Arc<dyn ...>>>`，在流水线内 `.get()` 读取。
+- **细化（偏离原文档）**：组件没有 hub/config，无法自己加载，所以读取方式是 `.get()` + `ModelError::NotLoaded`，而不是 `get_or_try_init`；加载逻辑集中留在 Engine，Step 4/5 由 Engine 在流启动时 `get_or_try_init` 预填充 cell，组件自然读到。
+- 对应读取点：indexer `flush_batch` / retriever `vector_recall` + `prepare_candidates` / synthesizer `ask` + `ask_internal`。
+- Engine 字段从 `OnceCell` 升级为 `Arc<OnceCell>`（与组件共享同一 cell）；`Engine::new` 负责包装，`open` 留下空 cell。
+- 验收：三个 crate 测试通过 stub cell 助手改造，全 workspace clippy + test 通过。
+
+#### Step 4 — `index_stream` 懒加载 + 模型下载事件 ✅ 已完成
+
+- `IndexEvent` 新增变体（tag 风格与现有一致）：
+  - `ModelDownloadStart { role: ModelRole, repo_id: String, filename: String }`
+  - `ModelDownloadComplete { role: ModelRole, elapsed_ms: u64 }`
+- `index_stream` / `index_one_stream` 改为统一走 `spawn_index`：`Engine::new` 预建的 indexer 直接用；`open` 引擎则懒加载 embedder + chunker 后现场建 Indexer。
+- **细化（偏离原文档）**：(a) 事件只在**真实下载**时发出（新增 `ModelHub::is_cached` 做缓存预判，缓存命中静默），符合验收标准；(b) 下载是 hf_hub 的异步 API，不需要 `spawn_blocking`；(c) 内部用 `DownloadPhase` 枚举统一下载进度，Step 5 映射到 Search/AskEvent；(d) chunker 也进 OnceCell（其 tokenizer 文件在 embedding 仓库里，随 embedder 一起 ensure）。
+- `storage.init(dimension)` 挪进 `ensure_embedder`（dimension 就绪后），`init(0)` 契约不变。
+- 测试：`test_engine_open_loads_no_models`（假 repo 快速失败 + 验证下载事件打头）、`test_open_engine_lazy_index_with_cached_models`（预填 stub cell，验证懒索引成功且无下载事件）。
+- 验收：首次 index 流以下载事件开头；已缓存模型的后续 index 无下载事件。
+
+#### Step 5 — `search_stream` / `ask_stream` 懒加载 ✅ 已完成
+
+- `SearchEvent` / `AskEvent` 增加同样的 `ModelDownloadStart/Complete` 变体（三个事件枚举各加一份，比引入第四种 `ModelEvent` 类型简单直接）。
+- 新增 `spawn_search` / `spawn_ask`：`Engine::new` 引擎复用预建 retriever/synthesizer；`open` 引擎懒加载 embedder + reranker（ask 再加 llm）后现场构建。
+- 非流式 `search` / `ask` 保留，内部驱动同一条流（`ask` 收集 `AnswerComplete`，`search` 收集 `Completed`）。
+- **细化（新增）**：`ensure_embedder` 拆成「模型本体」+ `ensure_chunker` 两个 ensure——search/ask 不再为 tokenizer 多付一次下载。
+- `ask` 的 LLM 缺失从 `LlmError::NotLoaded`（构造期判断）变为懒加载失败（运行期）；synthesizer 内对 `SearchEvent` 新变体做了穷尽匹配（eager 路径不会出现，显式忽略）。
+- 测试更新：`test_engine_open_loads_no_models`（search/ask 流消费到 Err 为止）、`test_engine_ask_without_llm_errors`（reranker/llm 指向假 repo 快速失败）。
+- 验收：CLI 首次 `semq search` / `semq ask` 完整可见「下载 → 检索 → 生成」事件链。
+
+#### Step 6 — 收敛 open API，废弃 `open_for_*` ✅ 已完成
+
+- **选择删除而非标记废弃**（pre-1.0，且 lib target 的 breaking change 已在 CHANGELOG 记录）：删除 `open_for_*` 三个入口及整套 eager 加载机制（`build_*_components`、`load_embedding`、`load_reranker(_sync)`、`load_llm_sync`）。
+- `main.rs` 三个命令改用 `Engine::open`；`index`/`search`/`ask` 消费流并**把下载进度打到 stderr**（补 Step 5 验收的 CLI 可见性）。
+- 组件内 `NotLoaded` 提示串从 `open_for_*` 改为 `Engine::open`；`open` 的 doc 移除「streams 尚未懒加载」的旧描述。
+- 文档：CHANGELOG 新增 Unreleased（Features + Breaking Changes）、README First-use downloads 改为懒加载描述、本条目标记完成。
+- 验收：全 workspace `clippy -D warnings` + `test` 通过。
+
+### 风险与注意点
+
+- **并发首调**：OnceCell 保证共享一次加载；注意 `get_or_try_init` 失败后可重试的语义是否符合预期。
+- **model_versions 记录时机**：保持在 ensure 成功后（与现状一致），模型升级触发 re-embed 的逻辑（indexer.rs:328）不受影响。
+- **性能回归**：CLI 单次调用行为应与现在等价（该加载的还是加载一次）；不得恶化 P3-12 之外的现状。
+- **P3-12 不解决**：「每次 CLI 调用都重新加载模型」由 MCP server 解决，本重构只保证 server 场景下加载一次常驻复用。
+- **回滚策略**：每步独立提交，Step 4/5 是行为变更最大的两步，评审重点放这里。
+

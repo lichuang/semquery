@@ -89,6 +89,23 @@ pub struct SearchStats {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SearchEvent {
+  /// A model file needs downloading from the model hub (not yet cached).
+  /// Emitted as the first events of a lazy search stream.
+  ModelDownloadStart {
+    /// Which model role this file belongs to.
+    role: ModelRole,
+    /// HuggingFace repo id.
+    repo_id: String,
+    /// File within the repo.
+    filename: String,
+  },
+  /// A model file download finished.
+  ModelDownloadComplete {
+    /// Which model role this file belongs to.
+    role: ModelRole,
+    /// Wall time of the download, in milliseconds.
+    elapsed_ms: u64,
+  },
   /// A pipeline stage started — for progress display.
   StageStarted { stage: SearchStage },
   /// A pipeline stage finished — carries the stage duration.
@@ -111,6 +128,23 @@ pub struct AskStats {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AskEvent {
+  /// A model file needs downloading from the model hub (not yet cached).
+  /// Emitted as the first events of a lazy ask stream.
+  ModelDownloadStart {
+    /// Which model role this file belongs to.
+    role: ModelRole,
+    /// HuggingFace repo id.
+    repo_id: String,
+    /// File within the repo.
+    filename: String,
+  },
+  /// A model file download finished.
+  ModelDownloadComplete {
+    /// Which model role this file belongs to.
+    role: ModelRole,
+    /// Wall time of the download, in milliseconds.
+    elapsed_ms: u64,
+  },
   /// A pipeline stage started — for progress display.
   StageStarted { stage: SearchStage },
   /// A pipeline stage finished — carries the stage duration.

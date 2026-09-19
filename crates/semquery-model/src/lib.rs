@@ -77,6 +77,34 @@ mod tests {
     assert_eq!(recorded.repo_id, spec.repo_id);
   }
 
+  #[test]
+  fn test_is_cached_resolves_symbolic_revision() {
+    let tmp = TempDir::new().unwrap();
+    let hub = ModelHub::new(tmp.path().to_path_buf());
+
+    // Symbolic revision ("main") mapped via refs/main -> commit hash, with the
+    // snapshot stored under the commit hash — the real hf_hub layout.
+    let spec = ModelRegistry::default_embedding();
+    seed_cache_file(tmp.path(), &spec, "fake model bytes");
+    assert!(hub.is_cached(&spec));
+
+    // Same repo, different file -> not cached.
+    let mut other = spec.clone();
+    other.filename = "other.onnx".into();
+    assert!(!hub.is_cached(&other));
+
+    // Revision pinned directly to a commit hash: no refs file, snapshot dir
+    // is named by the hash itself.
+    let mut pinned = spec.clone();
+    pinned.revision = "fakecommit".into();
+    assert!(hub.is_cached(&pinned));
+
+    // Unknown repo -> not cached.
+    let mut unknown = spec.clone();
+    unknown.repo_id = "nobody/nothing".into();
+    assert!(!hub.is_cached(&unknown));
+  }
+
   #[tokio::test]
   #[ignore = "requires network; run with cargo test -- --ignored"]
   async fn test_ensure_real_download_embedding() {
