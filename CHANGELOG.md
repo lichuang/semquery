@@ -1,3 +1,15 @@
+## [0.4.0] - 2026-09-21
+
+### 🚀 Features
+
+- Add streaming ask API (AskEvent with retrieval stage events, per-token LLM deltas, and AnswerComplete) with GgufLlm token-level streaming
+- Add open_data_only engine mode that serves workspace data without loading models, failing model-backed ops with NotLoaded errors
+- Derive Serialize/Deserialize for IndexEvent (tagged type) and IndexStats for downstream event payloads
+- [**breaking**] Lazy model loading — Engine::open is the single entry point, index/search/ask load models on first use with ModelDownload stream events (removes open_for_* APIs); fix lossless token streaming via block_in_place; fix is_cached hf_hub snapshot path
+
+### 🚜 Refactor
+
+- Rename DocqConfig/DocqError to SemqConfig/SemqError to finish the docq→semquery rename
 ## [0.3.0] - 2026-09-06
 
 ### 🚀 Features
@@ -16,6 +28,7 @@
 - *(storage)* Negate FTS5 bm25() scores so ScoreExplain follows the higher-is-better convention; doc(retrieve): update bm25_score comment to reflect negation; doc(optimize): mark bm25 score semantics item as completed
 - *(test-integration)* Isolate test workspace in temp dir
 - *(retriever)* Sort scored rerank candidates first
+- Scope GGML_METAL and CFLAGS to per-target env so Linux/Windows CI builds without Metal or MSVC-incompatible flags
 
 ### 🚜 Refactor
 
@@ -30,6 +43,7 @@
 
 - *(test-integration)* Align header comment with config scope
 - Update docs
+- Add CHANGELOG for v0.3.0
 
 ### ⚡ Performance
 
