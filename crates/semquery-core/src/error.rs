@@ -1,3 +1,6 @@
+use std::io;
+use std::result;
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -24,12 +27,12 @@ pub enum SemqError {
   Model(#[from] ModelError),
 }
 
-pub type Result<T> = std::result::Result<T, SemqError>;
+pub type Result<T> = result::Result<T, SemqError>;
 
 #[derive(Debug, Error)]
 pub enum ParseError {
   #[error("read {path}: {source}")]
-  Io { path: String, source: std::io::Error },
+  Io { path: String, source: io::Error },
 
   #[error("extract {path}: {message}")]
   ExtractFailed { path: String, message: String },

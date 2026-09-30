@@ -8,6 +8,7 @@
 //! 2009 ("Reciprocal Rank Fusion outperforms Condorcet and individual rank
 //! learning methods").
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 /// Fuse multiple ranked result lists into a single ranking.
@@ -31,7 +32,7 @@ pub fn reciprocal_rank_fusion(rankings: &[&[(String, f32)]], k: usize) -> Vec<(S
   }
 
   let mut fused: Vec<(String, f32)> = scores.into_iter().collect();
-  fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+  fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
   fused
 }
 

@@ -1,7 +1,9 @@
+use std::sync::OnceLock;
+
 use jieba_rs::Jieba;
 use semquery_core::WordSegmenter;
 
-static JIEBA: std::sync::OnceLock<Jieba> = std::sync::OnceLock::new();
+static JIEBA: OnceLock<Jieba> = OnceLock::new();
 
 fn jieba() -> &'static Jieba {
   JIEBA.get_or_init(Jieba::new)

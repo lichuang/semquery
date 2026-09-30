@@ -1,9 +1,10 @@
 use std::collections::HashMap;
+use std::mem::transmute;
 use std::path::Path;
 use std::sync::{Arc, Mutex, Once};
 
 use chrono::{DateTime, Utc};
-use rusqlite::ffi::sqlite3_auto_extension;
+use rusqlite::ffi::{sqlite3, sqlite3_api_routines, sqlite3_auto_extension};
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use semquery_core::{Chunk, Collection, Document, ModelRole, ModelSpec, Result, Storage, StorageTx, StoreError};
 use sqlite_vec::sqlite3_vec_init;
@@ -14,13 +15,9 @@ static VEC_EXT_LOADED: Once = Once::new();
 
 fn ensure_vec_extension() {
   VEC_EXT_LOADED.call_once(|| unsafe {
-    sqlite3_auto_extension(Some(std::mem::transmute::<
+    sqlite3_auto_extension(Some(transmute::<
       *const (),
-      unsafe extern "C" fn(
-        *mut rusqlite::ffi::sqlite3,
-        *mut *mut i8,
-        *const rusqlite::ffi::sqlite3_api_routines,
-      ) -> i32,
+      unsafe extern "C" fn(*mut sqlite3, *mut *mut i8, *const sqlite3_api_routines) -> i32,
     >(sqlite3_vec_init as *const ())));
   });
 }
@@ -160,9 +157,14 @@ fn insert_chunk_documents(conn: &Connection, chunk_ids: &[String], doc_id: &str)
 }
 
 fn insert_vectors(conn: &Connection, chunk_ids: &[String], embeddings: &[Vec<f32>]) -> rusqlite::Result<()> {
-  let mut stmt = conn.prepare("INSERT OR REPLACE INTO vec_chunks (chunk_id, embedding) VALUES (?1, ?2)")?;
+  // vec0 (sqlite-vec) virtual tables do not honor INSERT OR REPLACE, so an
+  // upsert is expressed as DELETE + INSERT. Idempotent for fresh ids (the
+  // DELETE is a no-op) and correct when re-embedding overwrites stale vectors.
+  let mut del = conn.prepare("DELETE FROM vec_chunks WHERE chunk_id = ?1")?;
+  let mut stmt = conn.prepare("INSERT INTO vec_chunks (chunk_id, embedding) VALUES (?1, ?2)")?;
   for (id, emb) in chunk_ids.iter().zip(embeddings.iter()) {
     let bytes = embedding_to_bytes(emb);
+    del.execute(params![id])?;
     stmt.execute(params![id, bytes])?;
   }
   Ok(())
@@ -386,6 +388,22 @@ impl Storage for SqliteStorage {
     Ok(rows.into_iter().collect())
   }
 
+  fn get_existing_chunk_ids(&self, chunk_ids: &[String]) -> Result<Vec<String>> {
+    if chunk_ids.is_empty() {
+      return Ok(Vec::new());
+    }
+    let conn = self.conn.lock().map_err(|_| poisoned())?;
+    let placeholders = (0..chunk_ids.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!("SELECT chunk_id FROM chunks WHERE chunk_id IN ({placeholders})");
+    let mut stmt = conn.prepare(&sql).map_err(map_rusqlite)?;
+    stmt
+      .query_map(params_from_iter(chunk_ids.iter()), |r| r.get::<_, String>(0))
+      .map_err(map_rusqlite)?
+      .collect::<rusqlite::Result<Vec<String>>>()
+      .map_err(map_rusqlite)
+      .map_err(Into::into)
+  }
+
   fn get_chunks(&self, chunk_ids: &[String]) -> Result<Vec<Chunk>> {
     if chunk_ids.is_empty() {
       return Ok(Vec::new());
@@ -586,7 +604,7 @@ impl StorageTx for SqliteTransaction {
 
   fn delete_document(&mut self, doc_id: &str) -> Result<()> {
     let conn = self.conn.lock().map_err(|_| poisoned())?;
-    crate::sqlite::delete_document(&conn, doc_id).map_err(map_rusqlite)?;
+    delete_document(&conn, doc_id).map_err(map_rusqlite)?;
     Ok(())
   }
 
@@ -604,7 +622,7 @@ impl StorageTx for SqliteTransaction {
 
   fn delete_chunks_by_doc(&mut self, doc_id: &str) -> Result<()> {
     let conn = self.conn.lock().map_err(|_| poisoned())?;
-    crate::sqlite::delete_chunks_by_doc(&conn, doc_id).map_err(map_rusqlite)?;
+    delete_chunks_by_doc(&conn, doc_id).map_err(map_rusqlite)?;
     Ok(())
   }
 
@@ -642,7 +660,7 @@ impl StorageTx for SqliteTransaction {
 
   fn set_model_version(&mut self, role: ModelRole, version: &ModelSpec) -> Result<()> {
     let conn = self.conn.lock().map_err(|_| poisoned())?;
-    crate::sqlite::set_model_version(&conn, role, version).map_err(map_rusqlite)?;
+    set_model_version(&conn, role, version).map_err(map_rusqlite)?;
     Ok(())
   }
 
@@ -695,6 +713,8 @@ mod tests {
   use super::*;
   use chrono::Utc;
   use semquery_core::{Chunk, Document, Storage, StorageTx};
+  use std::slice::from_ref;
+  use std::thread;
 
   fn make_doc(id: &str, content: &str) -> Document {
     Document {
@@ -943,10 +963,10 @@ mod tests {
     {
       let mut tx = storage.begin_tx().unwrap();
       tx.add_document(&doc).unwrap();
-      tx.add_chunks(std::slice::from_ref(&chunk)).unwrap();
+      tx.add_chunks(from_ref(&chunk)).unwrap();
       tx.add_chunk_documents(&["c1".to_string()], "doc1.txt").unwrap();
-      tx.add_vectors(&["c1".to_string()], std::slice::from_ref(&embedding)).unwrap();
-      tx.add_fts_chunks(&["c1".to_string()], std::slice::from_ref(&tokenized)).unwrap();
+      tx.add_vectors(&["c1".to_string()], from_ref(&embedding)).unwrap();
+      tx.add_fts_chunks(&["c1".to_string()], from_ref(&tokenized)).unwrap();
       tx.commit().unwrap();
     }
 
@@ -1018,7 +1038,7 @@ mod tests {
     let handles: Vec<_> = (0..8)
       .map(|_| {
         let s = storage.clone();
-        std::thread::spawn(move || {
+        thread::spawn(move || {
           assert!(s.get_document("doc1.txt").unwrap().is_some());
           assert!(!s.get_chunks(&["c1".to_string()]).unwrap().is_empty());
           assert!(!s.search_vectors(&vec![0.1_f32; 512], 10).unwrap().is_empty());
@@ -1049,7 +1069,7 @@ mod tests {
     }
 
     let reader = storage.clone();
-    let read_handle = std::thread::spawn(move || {
+    let read_handle = thread::spawn(move || {
       for _ in 0..50 {
         let docs = reader.list_documents().unwrap();
         assert!(docs.len() >= 5);
@@ -1058,7 +1078,7 @@ mod tests {
     });
 
     let writer = storage.clone();
-    let write_handle = std::thread::spawn(move || {
+    let write_handle = thread::spawn(move || {
       for i in 0..5 {
         let doc = make_doc(&format!("extra{i}.txt"), &format!("extra {i}"));
         let chunk = make_chunk(

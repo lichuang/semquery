@@ -75,6 +75,7 @@ impl Reranker for FastEmbedReranker {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::ModelRegistry;
   use semquery_core::{Chunk, Reranker};
   use tempfile::TempDir;
 
@@ -83,7 +84,7 @@ mod tests {
   async fn test_reranker_rerank() {
     let tmp = TempDir::new().unwrap();
     let hub = ModelHub::new(tmp.path().to_path_buf());
-    let spec = crate::ModelRegistry::default_reranker();
+    let spec = ModelRegistry::default_reranker();
 
     let reranker = FastEmbedReranker::from_model_hub(&hub, &spec).await.unwrap();
     assert_eq!(reranker.model_name(), crate::BGE_RERANKER_BASE_REPO);

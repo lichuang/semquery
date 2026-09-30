@@ -1,12 +1,14 @@
 //! Engine facade — assembles all components into a single API.
 
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::pin::pin;
 use std::sync::Arc;
 use std::time::Instant;
 
 use semquery_core::{
-  Chunker, Collection, Embedder, EngineStatus, IndexEvent, Llm, LlmConfig, ModelRole, ModelSpec, Reranker, Result,
-  SearchEvent, SearchHit, Storage, Verbose, WordSegmenter,
+  Answer, AskEvent, Chunker, Collection, Embedder, EngineStatus, IndexEvent, Llm, LlmConfig, LlmError, ModelRole,
+  ModelSpec, Reranker, Result, SearchEvent, SearchHit, Storage, StoreError, SynthError, Verbose, WordSegmenter,
 };
 #[cfg(feature = "docx")]
 use semquery_indexer::DocxReader;
@@ -18,13 +20,14 @@ use semquery_indexer::{
 };
 use semquery_model::{FastEmbedEmbedder, FastEmbedReranker, GgufLlm, ModelHub};
 use semquery_retrieve::{Retriever, RetrieverConfig};
+use tokenizers::Tokenizer;
 use tokio::sync::OnceCell;
 use tokio::sync::mpsc;
 use tokio_stream::Stream;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::config::{RetrievalConfig, SemqConfig};
+use crate::config::{IndexingConfig, RetrievalConfig, SemqConfig};
 use semquery_storage::SqliteStorage;
 use semquery_synth::{Synthesizer, SynthesizerConfig};
 
@@ -169,8 +172,7 @@ impl Engine {
   // ---- Shared helpers for model loading ----
 
   fn open_storage(workspace_path: &Path) -> Result<Arc<dyn Storage>> {
-    std::fs::create_dir_all(workspace_path)
-      .map_err(|e| semquery_core::StoreError::Io(format!("create workspace dir: {e}")))?;
+    fs::create_dir_all(workspace_path).map_err(|e| StoreError::Io(format!("create workspace dir: {e}")))?;
     let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::open_workspace(workspace_path)?);
     Ok(storage)
   }
@@ -179,7 +181,7 @@ impl Engine {
     hub: &ModelHub,
     emb_spec: &ModelSpec,
     tokenizer_filename: &str,
-    indexing: &crate::config::IndexingConfig,
+    indexing: &IndexingConfig,
   ) -> Result<Arc<dyn Chunker>> {
     let tokenizer_spec = ModelSpec {
       role: ModelRole::Tokenizer,
@@ -189,8 +191,7 @@ impl Engine {
       checksum: None,
     };
     let path = hub.resolve(&tokenizer_spec).await?;
-    let tokenizer =
-      tokenizers::Tokenizer::from_file(&path).map_err(|e| semquery_core::LlmError::TokenizerLoad(e.to_string()))?;
+    let tokenizer = Tokenizer::from_file(&path).map_err(|e| LlmError::TokenizerLoad(e.to_string()))?;
     Ok(Arc::new(SentenceSplitter::new(
       tokenizer,
       indexing.chunk_size,
@@ -227,8 +228,8 @@ impl Engine {
   }
 
   pub fn add_collection(&self, name: &str, path: impl AsRef<Path>) -> Result<()> {
-    let canonical = std::fs::canonicalize(path.as_ref())
-      .map_err(|e| semquery_core::StoreError::Io(format!("canonicalize {}: {e}", path.as_ref().display())))?;
+    let canonical = fs::canonicalize(path.as_ref())
+      .map_err(|e| StoreError::Io(format!("canonicalize {}: {e}", path.as_ref().display())))?;
     let path_str = canonical.to_string_lossy().to_string();
     let mut tx = self.storage.begin_tx()?;
     tx.add_collection(name, &path_str)?;
@@ -241,10 +242,10 @@ impl Engine {
   }
 
   pub fn add_file(&self, name: &str, path: impl AsRef<Path>) -> Result<()> {
-    let canonical = std::fs::canonicalize(path.as_ref())
-      .map_err(|e| semquery_core::StoreError::Io(format!("canonicalize {}: {e}", path.as_ref().display())))?;
+    let canonical = fs::canonicalize(path.as_ref())
+      .map_err(|e| StoreError::Io(format!("canonicalize {}: {e}", path.as_ref().display())))?;
     if !canonical.is_file() {
-      return Err(semquery_core::StoreError::Io(format!("{} is not a file", canonical.display())).into());
+      return Err(StoreError::Io(format!("{} is not a file", canonical.display())).into());
     }
     self.add_collection(name, &canonical)
   }
@@ -285,7 +286,7 @@ impl Engine {
   ) -> Result<impl Stream<Item = Result<IndexEvent>> + Send + 'static> {
     let name = name.into();
     let collections = self.storage.list_collections()?;
-    let col = collections.into_iter().find(|c| c.name == name).ok_or(semquery_core::StoreError::NotFound(name))?;
+    let col = collections.into_iter().find(|c| c.name == name).ok_or(StoreError::NotFound(name))?;
     Ok(self.spawn_index(vec![(col.name, col.path)]))
   }
 
@@ -344,7 +345,7 @@ impl Engine {
             }))
           }
         };
-        let mut stream = std::pin::pin!(indexer.index_sources_stream(sources));
+        let mut stream = pin!(indexer.index_sources_stream(sources));
         while let Some(event) = stream.next().await {
           if tx.send(event).await.is_err() {
             return Ok(()); // consumer dropped
@@ -501,7 +502,7 @@ impl Engine {
   /// Search for passages. Drives the same lazy-loading stream as
   /// [`Engine::search_stream`] and returns the final hit list.
   pub async fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>> {
-    let mut stream = std::pin::pin!(self.spawn_search(query.to_string(), top_k));
+    let mut stream = pin!(self.spawn_search(query.to_string(), top_k));
     let mut hits = Vec::new();
     while let Some(event) = stream.next().await {
       if let SearchEvent::Completed { hits: final_hits, .. } = event? {
@@ -572,7 +573,7 @@ impl Engine {
             ))
           }
         };
-        let mut stream = std::pin::pin!(retriever.search_stream(query, top_k));
+        let mut stream = pin!(retriever.search_stream(query, top_k));
         while let Some(event) = stream.next().await {
           if tx.send(event).await.is_err() {
             return Ok(()); // consumer dropped
@@ -591,25 +592,21 @@ impl Engine {
 
   /// Ask a question and get a cited answer. Drives the same lazy-loading
   /// stream as [`Engine::ask_stream`] and returns the terminal answer.
-  pub async fn ask(&self, query: &str) -> Result<semquery_core::Answer> {
-    let mut stream = std::pin::pin!(self.spawn_ask(query.to_string()));
+  pub async fn ask(&self, query: &str) -> Result<Answer> {
+    let mut stream = pin!(self.spawn_ask(query.to_string()));
     let mut answer = None;
     while let Some(event) = stream.next().await {
-      if let semquery_core::AskEvent::AnswerComplete { answer: a, .. } = event? {
+      if let AskEvent::AnswerComplete { answer: a, .. } = event? {
         answer = Some(a);
       }
     }
-    answer.ok_or_else(|| semquery_core::SynthError::Other("ask stream ended without AnswerComplete".into()).into())
+    answer.ok_or_else(|| SynthError::Other("ask stream ended without AnswerComplete".into()).into())
   }
 
   /// Streaming variant of [`Engine::ask`]: model download events (first use,
   /// uncached), then retrieval stage events, then each LLM token as it is
   /// decoded, terminated by `AnswerComplete`.
-  pub fn ask_stream(
-    &self,
-    query: impl Into<String>,
-  ) -> Result<impl Stream<Item = std::result::Result<semquery_core::AskEvent, semquery_core::SemqError>> + Send + 'static>
-  {
+  pub fn ask_stream(&self, query: impl Into<String>) -> Result<impl Stream<Item = Result<AskEvent>> + Send + 'static> {
     Ok(self.spawn_ask(query.into()))
   }
 
@@ -618,11 +615,8 @@ impl Engine {
   /// embedder + reranker + LLM (emitting download events when a file
   /// actually hits the network) and construct the retriever + synthesizer on
   /// first use.
-  fn spawn_ask(
-    &self,
-    query: String,
-  ) -> impl Stream<Item = std::result::Result<semquery_core::AskEvent, semquery_core::SemqError>> + Send + 'static {
-    let (tx, rx) = mpsc::channel::<std::result::Result<semquery_core::AskEvent, semquery_core::SemqError>>(32);
+  fn spawn_ask(&self, query: String) -> impl Stream<Item = Result<AskEvent>> + Send + 'static {
+    let (tx, rx) = mpsc::channel::<Result<AskEvent>>(32);
     let synthesizer = self.synthesizer.clone();
     let retriever = self.retriever.clone();
     let embedder_cell = self.embedder.clone();
@@ -640,12 +634,12 @@ impl Engine {
           None => {
             let mut emit = |spec: &ModelSpec, phase: DownloadPhase| {
               let event = match phase {
-                DownloadPhase::Start => semquery_core::AskEvent::ModelDownloadStart {
+                DownloadPhase::Start => AskEvent::ModelDownloadStart {
                   role: spec.role,
                   repo_id: spec.repo_id.clone(),
                   filename: spec.filename.clone(),
                 },
-                DownloadPhase::Complete { elapsed_ms } => semquery_core::AskEvent::ModelDownloadComplete {
+                DownloadPhase::Complete { elapsed_ms } => AskEvent::ModelDownloadComplete {
                   role: spec.role,
                   elapsed_ms,
                 },
@@ -681,7 +675,7 @@ impl Engine {
             })
           }
         };
-        let mut stream = std::pin::pin!(synthesizer.ask_stream(query));
+        let mut stream = pin!(synthesizer.ask_stream(query));
         while let Some(event) = stream.next().await {
           if tx.send(event).await.is_err() {
             return Ok(()); // consumer dropped
@@ -724,6 +718,8 @@ mod tests {
 
   use super::*;
   use semquery_core::{ChunkCandidate, Chunker, Embedder, Llm, Storage};
+  use std::env::temp_dir;
+  use std::fs;
   use tempfile::TempDir;
   use tokio_stream::StreamExt;
 
@@ -786,15 +782,15 @@ mod tests {
   fn test_components(storage: Arc<dyn Storage>) -> EngineComponents {
     EngineComponents {
       storage,
-      hub: ModelHub::new(std::env::temp_dir().join("semq-test-model-cache")),
-      config: crate::config::SemqConfig::default(),
+      hub: ModelHub::new(temp_dir().join("semq-test-model-cache")),
+      config: SemqConfig::default(),
       chunker: Arc::new(StubChunker),
       embedder: Arc::new(StubEmbedder { dim: 512 }),
       segmenter: Arc::new(JiebaSegmenter),
       reranker: None,
       llm: Some(Arc::new(StubLlm)),
       readers: test_readers(),
-      retrieval: crate::config::RetrievalConfig {
+      retrieval: RetrievalConfig {
         bm25_top_k: 100,
         vector_top_k: 100,
         rrf_k: 60,
@@ -838,7 +834,7 @@ mod tests {
     let engine = Engine::new(test_components(storage));
 
     let notes_dir = TempDir::new().unwrap();
-    std::fs::write(notes_dir.path().join("note.txt"), "今天是我的生日").unwrap();
+    fs::write(notes_dir.path().join("note.txt"), "今天是我的生日").unwrap();
     engine.add_collection("notes", notes_dir.path()).unwrap();
 
     let stats = engine.index().await.unwrap();
@@ -856,7 +852,7 @@ mod tests {
     let engine = Engine::new(test_components(storage));
 
     let notes_dir = TempDir::new().unwrap();
-    std::fs::write(notes_dir.path().join("note.txt"), "今天是我的生日").unwrap();
+    fs::write(notes_dir.path().join("note.txt"), "今天是我的生日").unwrap();
     engine.add_collection("notes", notes_dir.path()).unwrap();
 
     let stats = engine.index().await.unwrap();
@@ -881,7 +877,7 @@ mod tests {
     let engine = Engine::new(test_components(storage));
 
     let notes_dir = TempDir::new().unwrap();
-    std::fs::write(notes_dir.path().join("note.txt"), "今天是我的生日").unwrap();
+    fs::write(notes_dir.path().join("note.txt"), "今天是我的生日").unwrap();
     engine.add_collection("notes", notes_dir.path()).unwrap();
 
     let mut stream = engine.index_stream().unwrap();
@@ -908,7 +904,7 @@ mod tests {
     let engine = Engine::new(test_components(storage));
 
     let notes_dir = TempDir::new().unwrap();
-    std::fs::write(notes_dir.path().join("note.txt"), "定价方案选坐席制").unwrap();
+    fs::write(notes_dir.path().join("note.txt"), "定价方案选坐席制").unwrap();
     engine.add_collection("notes", notes_dir.path()).unwrap();
 
     let mut stream = engine.index_one_stream("notes").unwrap();
@@ -931,7 +927,7 @@ mod tests {
     let engine = Engine::new(test_components(storage));
 
     let notes_dir = TempDir::new().unwrap();
-    std::fs::write(notes_dir.path().join("note.txt"), "定价方案选坐席制").unwrap();
+    fs::write(notes_dir.path().join("note.txt"), "定价方案选坐席制").unwrap();
     engine.add_collection("notes", notes_dir.path()).unwrap();
     engine.index().await.unwrap();
 
@@ -945,7 +941,7 @@ mod tests {
     // Point the embedding model at a repo that cannot exist so the lazy load
     // triggered by index() fails fast (404 / DNS error) instead of
     // downloading a real model in a unit test.
-    let mut semq_config = crate::config::SemqConfig::default();
+    let mut semq_config = SemqConfig::default();
     semq_config.models.embedding.repo_id = "nonexistent/repo".into();
     let config = EngineConfig {
       workspace_path: tmp.path().to_path_buf(),
@@ -964,13 +960,13 @@ mod tests {
 
     // index() drives lazy loading on an `open` engine: the stream emits a
     // ModelDownloadStart event and then fails because the model is unfetchable.
-    let mut stream = std::pin::pin!(engine.index_stream().unwrap());
+    let mut stream = pin!(engine.index_stream().unwrap());
     let mut saw_download_start = false;
     let mut failed = false;
     while let Some(event) = stream.next().await {
       match event {
         Ok(IndexEvent::ModelDownloadStart { role, .. }) => {
-          assert_eq!(role, semquery_core::ModelRole::Embedding);
+          assert_eq!(role, ModelRole::Embedding);
           saw_download_start = true;
         }
         Ok(_) => {}
@@ -989,7 +985,7 @@ mod tests {
     // Retrieval / ask are lazy too: they attempt to load the (unfetchable)
     // embedding model and fail inside the stream.
     assert!(engine.search("生日", 5).await.is_err());
-    let mut search_stream = std::pin::pin!(engine.search_stream("生日", 5).unwrap());
+    let mut search_stream = pin!(engine.search_stream("生日", 5).unwrap());
     let mut search_failed = false;
     while let Some(event) = search_stream.next().await {
       if event.is_err() {
@@ -999,7 +995,7 @@ mod tests {
     }
     assert!(search_failed, "lazy search must fail when the model cannot be fetched");
     assert!(engine.ask("生日").await.is_err());
-    let mut ask_stream = std::pin::pin!(engine.ask_stream("生日").unwrap());
+    let mut ask_stream = pin!(engine.ask_stream("生日").unwrap());
     let mut ask_failed = false;
     while let Some(event) = ask_stream.next().await {
       if event.is_err() {
@@ -1016,7 +1012,7 @@ mod tests {
     let engine = Engine::open(EngineConfig {
       workspace_path: tmp.path().to_path_buf(),
       model_cache_dir: tmp.path().join("models"),
-      config: crate::config::SemqConfig::default(),
+      config: SemqConfig::default(),
       verbose: Verbose(false),
     })
     .unwrap();
@@ -1029,10 +1025,10 @@ mod tests {
     assert!(engine.chunker.set(Arc::new(StubChunker)).is_ok());
 
     let notes_dir = TempDir::new().unwrap();
-    std::fs::write(notes_dir.path().join("note.txt"), "今天是我的生日").unwrap();
+    fs::write(notes_dir.path().join("note.txt"), "今天是我的生日").unwrap();
     engine.add_collection("notes", notes_dir.path()).unwrap();
 
-    let mut stream = std::pin::pin!(engine.index_stream().unwrap());
+    let mut stream = pin!(engine.index_stream().unwrap());
     let mut completed = None;
     let mut download_events = 0;
     while let Some(event) = stream.next().await {
@@ -1058,7 +1054,7 @@ mod tests {
       let engine = Engine::open(EngineConfig {
         workspace_path: tmp.path().to_path_buf(),
         model_cache_dir: tmp.path().join("models"),
-        config: crate::config::SemqConfig::default(),
+        config: SemqConfig::default(),
         verbose: Verbose(false),
       })
       .unwrap();
@@ -1089,7 +1085,7 @@ mod tests {
       let engine = Engine::new(test_components(storage));
 
       let notes_dir = TempDir::new().unwrap();
-      std::fs::write(notes_dir.path().join("note.txt"), "今天是我的生日").unwrap();
+      fs::write(notes_dir.path().join("note.txt"), "今天是我的生日").unwrap();
       engine.add_collection("notes", notes_dir.path()).unwrap();
       let stats = engine.index().await.unwrap();
       assert!(stats.chunks_indexed > 0);
@@ -1100,7 +1096,7 @@ mod tests {
       let engine = Engine::open(EngineConfig {
         workspace_path: tmp.path().to_path_buf(),
         model_cache_dir: tmp.path().join("models"),
-        config: crate::config::SemqConfig::default(),
+        config: SemqConfig::default(),
         verbose: Verbose(false),
       })
       .unwrap();
@@ -1125,12 +1121,12 @@ mod tests {
     // No LLM injected: ask() falls back to lazy loading, which must fail
     // fast. Point reranker/llm at repos that cannot exist so no real
     // download is attempted (the embedder cell is pre-filled with a stub).
-    let mut semq_config = crate::config::SemqConfig::default();
+    let mut semq_config = SemqConfig::default();
     semq_config.models.reranker.repo_id = "nonexistent/repo".into();
     semq_config.models.llm.repo_id = "nonexistent/repo".into();
     let components = EngineComponents {
       storage,
-      hub: ModelHub::new(std::env::temp_dir().join("semq-test-model-cache")),
+      hub: ModelHub::new(temp_dir().join("semq-test-model-cache")),
       config: semq_config,
       chunker: Arc::new(StubChunker),
       embedder: Arc::new(StubEmbedder { dim: 512 }),
@@ -1138,7 +1134,7 @@ mod tests {
       reranker: None,
       llm: None,
       readers: test_readers(),
-      retrieval: crate::config::RetrievalConfig {
+      retrieval: RetrievalConfig {
         bm25_top_k: 100,
         vector_top_k: 100,
         rrf_k: 60,

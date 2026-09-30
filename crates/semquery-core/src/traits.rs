@@ -8,12 +8,13 @@
 //! [`Llm`]: crate::traits::Llm
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::models::{Chunk, ChunkCandidate, Collection, Document, DocumentSource, ModelRole, ModelSpec};
+use crate::models::{Chunk, ChunkCandidate, Collection, Document, DocumentSource, ModelRole, ModelSpec, ScoredChunk};
 
 #[async_trait]
 pub trait Embedder: Send + Sync {
@@ -24,7 +25,7 @@ pub trait Embedder: Send + Sync {
 
 #[async_trait]
 pub trait Reranker: Send + Sync {
-  async fn rerank(&self, query: &str, chunks: &[Chunk]) -> Result<Vec<crate::models::ScoredChunk>>;
+  async fn rerank(&self, query: &str, chunks: &[Chunk]) -> Result<Vec<ScoredChunk>>;
 }
 
 #[async_trait]
@@ -52,7 +53,7 @@ pub trait FileReader: Send + Sync {
   /// Read a single file and return its content as a `DocumentSource`.
   /// Return `Ok(None)` to silently skip the file (e.g. empty or
   /// non-UTF-8).
-  fn read(&self, path: &std::path::Path) -> Result<Option<DocumentSource>>;
+  fn read(&self, path: &Path) -> Result<Option<DocumentSource>>;
 }
 
 pub trait WordSegmenter: Send + Sync {
@@ -70,6 +71,9 @@ pub trait Storage: Send + Sync {
   fn list_documents(&self) -> Result<Vec<Document>>;
   fn get_document_paths(&self, doc_ids: &[String]) -> Result<HashMap<String, String>>;
   fn get_chunks(&self, chunk_ids: &[String]) -> Result<Vec<Chunk>>;
+  /// Which of the given chunk ids are already stored. Used by the indexer to
+  /// skip re-embedding shared chunks (identical text hashed to the same id).
+  fn get_existing_chunk_ids(&self, chunk_ids: &[String]) -> Result<Vec<String>>;
   fn search_vectors(&self, embedding: &[f32], top_k: usize) -> Result<Vec<(String, f32)>>;
   fn search_text(&self, query: &str, top_k: usize) -> Result<Vec<(String, f32)>>;
   fn get_model_version(&self, role: ModelRole) -> Result<Option<ModelSpec>>;

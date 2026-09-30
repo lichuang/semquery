@@ -1,9 +1,11 @@
+use std::fs;
 use std::io::{Cursor, Read};
 use std::path::Path;
 
 use quick_xml::Reader;
 use quick_xml::events::Event;
-use semquery_core::{FileReader, ParseError, Result};
+use semquery_core::{DocumentSource, FileReader, ParseError, Result};
+use zip::ZipArchive;
 
 pub struct DocxReader;
 
@@ -24,13 +26,13 @@ impl FileReader for DocxReader {
     &["docx"]
   }
 
-  fn read(&self, path: &Path) -> Result<Option<semquery_core::DocumentSource>> {
-    let bytes = std::fs::read(path).map_err(|e| ParseError::Io {
+  fn read(&self, path: &Path) -> Result<Option<DocumentSource>> {
+    let bytes = fs::read(path).map_err(|e| ParseError::Io {
       path: path.display().to_string(),
       source: e,
     })?;
     let cursor = Cursor::new(&bytes);
-    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| ParseError::ZipFailed {
+    let mut archive = ZipArchive::new(cursor).map_err(|e| ParseError::ZipFailed {
       path: path.display().to_string(),
       message: e.to_string(),
     })?;
@@ -53,7 +55,7 @@ impl FileReader for DocxReader {
     if text.trim().is_empty() {
       Ok(None)
     } else {
-      Ok(Some(semquery_core::DocumentSource {
+      Ok(Some(DocumentSource {
         path: path.to_path_buf(),
         content: text,
       }))
@@ -101,12 +103,17 @@ mod tests {
   use std::fs;
   use std::io::Write;
   use tempfile::TempDir;
+  use zip::CompressionMethod;
+  use zip::ZipWriter;
+  use zip::write::SimpleFileOptions;
+
+  use quick_xml::escape::escape;
 
   fn docx_bytes_with_text(text: &str) -> Vec<u8> {
     let mut buf = Vec::new();
     {
-      let mut zip = zip::ZipWriter::new(Cursor::new(&mut buf));
-      let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+      let mut zip = ZipWriter::new(Cursor::new(&mut buf));
+      let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
       let xml = format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
@@ -118,7 +125,7 @@ mod tests {
     </w:p>
   </w:body>
 </w:document>"#,
-        quick_xml::escape::escape(text)
+        escape(text)
       );
       zip.start_file("word/document.xml", options).unwrap();
       zip.write_all(xml.as_bytes()).unwrap();

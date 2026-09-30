@@ -1,5 +1,8 @@
+use std::fmt;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::result::Result as StdResult;
+use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -67,8 +70,8 @@ impl SearchStage {
   }
 }
 
-impl std::fmt::Display for SearchStage {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for SearchStage {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.write_str(self.as_str())
   }
 }
@@ -205,15 +208,15 @@ impl ModelRole {
   }
 }
 
-impl std::fmt::Display for ModelRole {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for ModelRole {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.write_str(self.as_str())
   }
 }
 
-impl std::str::FromStr for ModelRole {
+impl FromStr for ModelRole {
   type Err = String;
-  fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+  fn from_str(s: &str) -> StdResult<Self, Self::Err> {
     match s {
       "embedding" => Ok(Self::Embedding),
       "reranker" => Ok(Self::Reranker),
@@ -259,12 +262,12 @@ impl Default for LlmConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Collection {
   pub name: String,
-  pub path: std::path::PathBuf,
+  pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentSource {
-  pub path: std::path::PathBuf,
+  pub path: PathBuf,
   pub content: String,
 }
 

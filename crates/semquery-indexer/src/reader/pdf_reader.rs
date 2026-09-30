@@ -1,6 +1,7 @@
+use std::fs;
 use std::path::Path;
 
-use semquery_core::{FileReader, ParseError, Result};
+use semquery_core::{DocumentSource, FileReader, ParseError, Result};
 
 pub struct PdfReader;
 
@@ -21,8 +22,8 @@ impl FileReader for PdfReader {
     &["pdf"]
   }
 
-  fn read(&self, path: &Path) -> Result<Option<semquery_core::DocumentSource>> {
-    let bytes = std::fs::read(path).map_err(|e| ParseError::Io {
+  fn read(&self, path: &Path) -> Result<Option<DocumentSource>> {
+    let bytes = fs::read(path).map_err(|e| ParseError::Io {
       path: path.display().to_string(),
       source: e,
     })?;

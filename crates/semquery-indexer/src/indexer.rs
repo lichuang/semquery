@@ -1,11 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ops::Add;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
 use rayon::prelude::*;
 use semquery_core::{
-  Chunk, Chunker, Document, Embedder, IndexEvent, ModelRole, ModelSpec, Result, SemqError, Storage, Verbose,
+  Chunk, Chunker, Document, Embedder, IndexEvent, ModelError, ModelRole, ModelSpec, Result, Storage, Verbose,
   WordSegmenter,
 };
 use serde::{Deserialize, Serialize};
@@ -28,7 +29,7 @@ pub struct IndexStats {
   pub chunks_indexed: usize,
 }
 
-impl std::ops::Add for IndexStats {
+impl Add for IndexStats {
   type Output = IndexStats;
 
   fn add(self, other: IndexStats) -> IndexStats {
@@ -41,7 +42,7 @@ impl std::ops::Add for IndexStats {
   }
 }
 
-type IndexEventItem = std::result::Result<IndexEvent, SemqError>;
+type IndexEventItem = Result<IndexEvent>;
 pub type IndexEventSender = Sender<IndexEventItem>;
 
 async fn send_event(tx: &IndexEventSender, event: IndexEvent) -> bool {
@@ -142,9 +143,13 @@ impl Indexer {
     }
   }
 
-  fn needs_reindex(&self) -> Result<bool> {
+  fn need_reindex(&self) -> Result<bool> {
+    // `None` means this storage has never recorded indexing meta — a fresh
+    // workspace has nothing to re-embed. The meta is written after this run
+    // by `update_index_meta`, so treating `None` as "changed" would force
+    // the re-embed path (and disable shared-chunk dedup) on every first run.
     let model_changed = match self.storage.get_model_version(ModelRole::Embedding)? {
-      None => true,
+      None => false,
       Some(spec) => {
         spec.repo_id != self.embedding_spec.repo_id
           || spec.filename != self.embedding_spec.filename
@@ -155,7 +160,10 @@ impl Indexer {
       return Ok(true);
     }
     let expected_chunk = format!("{}:{}", self.chunk_size, self.chunk_overlap);
-    let chunk_changed = self.storage.get_meta("indexing")?.as_deref() != Some(expected_chunk.as_str());
+    let chunk_changed = match self.storage.get_meta("indexing")? {
+      Some(value) => value != expected_chunk,
+      None => false,
+    };
     Ok(chunk_changed)
   }
 
@@ -196,7 +204,7 @@ impl Indexer {
 
     let existing_docs = self.storage.list_documents()?;
     let existing_map: HashMap<String, Document> = existing_docs.into_iter().map(|d| (d.id.clone(), d)).collect();
-    let force_reindex = self.needs_reindex()?;
+    let force_reindex = self.need_reindex()?;
 
     match self.prepare_file(&doc_src.path, &doc_src.content, &existing_map, force_reindex)? {
       Some(pending) => {
@@ -214,10 +222,10 @@ impl Indexer {
           return Ok(IndexStats::default());
         }
         let mut batch = vec![pending];
-        let stats = self.flush_batch(&mut batch, tx).await?;
-        if force_reindex {
-          self.update_index_meta()?;
-        }
+        let stats = self.flush_batch(&mut batch, force_reindex, tx).await?;
+        // Idempotent: also records meta on first-ever runs, so subsequent
+        // runs can detect model / config changes.
+        self.update_index_meta()?;
         let _ = send_event(
           tx,
           IndexEvent::Complete {
@@ -315,8 +323,7 @@ impl Indexer {
       return Ok(IndexStats::default());
     }
 
-    let current_doc_ids: std::collections::HashSet<String> =
-      file_paths.iter().map(|p| sha256_hex(&p.to_string_lossy())).collect();
+    let current_doc_ids: HashSet<String> = file_paths.iter().map(|p| sha256_hex(&p.to_string_lossy())).collect();
 
     let all_docs = self.storage.list_documents()?;
     let mut stats = IndexStats {
@@ -327,7 +334,7 @@ impl Indexer {
     let existing_map: Arc<HashMap<String, Document>> =
       Arc::new(all_docs.into_iter().map(|d| (d.id.clone(), d)).collect());
 
-    let force_reindex = self.needs_reindex()?;
+    let force_reindex = self.need_reindex()?;
     if force_reindex {
       self.verbose.log("indexing config or embedding model changed — forcing full re-index");
     }
@@ -378,7 +385,7 @@ impl Indexer {
       pending_chunk_count += pf.chunks.len();
       pending.push(pf);
       if pending_chunk_count >= EMBED_BATCH_SIZE {
-        let s = self.flush_batch(&mut pending, tx).await?;
+        let s = self.flush_batch(&mut pending, force_reindex, tx).await?;
         stats.files_indexed += s.files_indexed;
         stats.chunks_indexed += s.chunks_indexed;
         pending_chunk_count = 0;
@@ -389,14 +396,14 @@ impl Indexer {
     stats.files_skipped = skipped;
 
     if !pending.is_empty() {
-      let s = self.flush_batch(&mut pending, tx).await?;
+      let s = self.flush_batch(&mut pending, force_reindex, tx).await?;
       stats.files_indexed += s.files_indexed;
       stats.chunks_indexed += s.chunks_indexed;
     }
 
-    if force_reindex {
-      self.update_index_meta()?;
-    }
+    // Idempotent: also records meta on first-ever runs, so subsequent
+    // runs can detect model / config changes.
+    self.update_index_meta()?;
 
     let _ = send_event(
       tx,
@@ -411,12 +418,7 @@ impl Indexer {
     Ok(stats)
   }
 
-  fn sweep_deleted(
-    &self,
-    dir: &Path,
-    current_doc_ids: &std::collections::HashSet<String>,
-    all_docs: &[Document],
-  ) -> Result<usize> {
+  fn sweep_deleted(&self, dir: &Path, current_doc_ids: &HashSet<String>, all_docs: &[Document]) -> Result<usize> {
     if all_docs.is_empty() {
       return Ok(0);
     }
@@ -503,20 +505,65 @@ impl Indexer {
     }))
   }
 
-  /// Embed all chunks in `pending` in one batch, then write to storage
+  /// Embed all *new* chunks in `pending` in one batch, then write to storage
   /// in groups of `TX_BATCH_SIZE` files per transaction.
-  async fn flush_batch(&self, pending: &mut Vec<PendingFile>, tx: &IndexEventSender) -> Result<IndexStats> {
+  ///
+  /// Chunk ids are content hashes, so files sharing text (duplicated notes,
+  /// boilerplate) collide with already-stored chunks. Those chunks are not
+  /// re-embedded and not re-inserted — sqlite-vec `vec0` tables do not honor
+  /// `INSERT OR REPLACE`, so a duplicate vector insert used to abort the
+  /// whole index run. This document still links to the shared chunks via
+  /// `chunk_documents`, keeping every file independently resolvable.
+  ///
+  /// When `reembed` is set (embedding model / indexing config changed), the
+  /// filter is skipped and every chunk is re-embedded and overwritten.
+  async fn flush_batch(
+    &self,
+    pending: &mut Vec<PendingFile>,
+    reembed: bool,
+    tx: &IndexEventSender,
+  ) -> Result<IndexStats> {
     const TX_BATCH_SIZE: usize = 5;
 
-    let all_texts: Vec<String> = pending.iter().flat_map(|f| f.chunk_texts.iter().cloned()).collect();
-    if !send_event(tx, IndexEvent::EmbeddingBatch { count: all_texts.len() }).await {
+    let mut existing: HashSet<String> = HashSet::new();
+    if !reembed {
+      let all_ids: Vec<String> = pending.iter().flat_map(|f| f.chunks.iter().map(|c| c.id.clone())).collect();
+      existing = self.storage.get_existing_chunk_ids(&all_ids)?.into_iter().collect();
+    }
+
+    // Keep-set per file: chunks already in storage, or already claimed by an
+    // earlier file in this same batch, are not embedded again.
+    let mut claimed: HashSet<String> = HashSet::new();
+    let plans: Vec<Vec<bool>> = pending
+      .iter()
+      .map(|pf| {
+        pf.chunks
+          .iter()
+          .map(|c| reembed || (!existing.contains(&c.id) && claimed.insert(c.id.clone())))
+          .collect()
+      })
+      .collect();
+
+    let embed_texts: Vec<String> = pending
+      .iter()
+      .zip(&plans)
+      .flat_map(|(pf, plan)| pf.chunk_texts.iter().zip(plan).filter(|(_, keep)| **keep).map(|(t, _)| t.clone()))
+      .collect();
+    if !send_event(
+      tx,
+      IndexEvent::EmbeddingBatch {
+        count: embed_texts.len(),
+      },
+    )
+    .await
+    {
       return Ok(IndexStats::default());
     }
-    let embedder = self.embedder.get().ok_or(semquery_core::ModelError::NotLoaded {
+    let embedder = self.embedder.get().ok_or(ModelError::NotLoaded {
       component: "embedder",
       opener: "Engine::open",
     })?;
-    let all_embeddings = embedder.embed(&all_texts).await?;
+    let all_embeddings = embedder.embed(&embed_texts).await?;
     if !send_event(tx, IndexEvent::WritingStore).await {
       return Ok(IndexStats::default());
     }
@@ -526,24 +573,27 @@ impl Indexer {
     let mut tx_count = 0usize;
     let mut tx = self.storage.begin_tx()?;
 
-    for pf in pending.drain(..) {
-      let n = pf.chunks.len();
-      let embeddings: Vec<Vec<f32>> = all_embeddings[offset..offset + n].to_vec();
-      let chunk_ids: Vec<String> = pf.chunks.iter().map(|c| c.id.clone()).collect();
+    for (pf, plan) in pending.drain(..).zip(plans) {
+      let kept: Vec<usize> = plan.iter().enumerate().filter_map(|(i, keep)| keep.then_some(i)).collect();
+      let new_chunks: Vec<Chunk> = kept.iter().map(|&i| pf.chunks[i].clone()).collect();
+      let embeddings: Vec<Vec<f32>> = all_embeddings[offset..offset + kept.len()].to_vec();
+      let new_ids: Vec<String> = new_chunks.iter().map(|c| c.id.clone()).collect();
+      let new_tokenized: Vec<String> = kept.iter().map(|&i| pf.tokenized_texts[i].clone()).collect();
+      let link_ids: Vec<String> = pf.chunks.iter().map(|c| c.id.clone()).collect();
+      offset += kept.len();
 
       if pf.is_update {
         tx.delete_chunks_by_doc(&pf.doc.id)?;
       }
       tx.add_document(&pf.doc)?;
       tx.set_document_path(&pf.doc.id, &pf.path.to_string_lossy())?;
-      tx.add_chunks(&pf.chunks)?;
-      tx.add_chunk_documents(&chunk_ids, &pf.doc.id)?;
-      tx.add_vectors(&chunk_ids, &embeddings)?;
-      tx.add_fts_chunks(&chunk_ids, &pf.tokenized_texts)?;
+      tx.add_chunks(&new_chunks)?;
+      tx.add_chunk_documents(&link_ids, &pf.doc.id)?;
+      tx.add_vectors(&new_ids, &embeddings)?;
+      tx.add_fts_chunks(&new_ids, &new_tokenized)?;
 
       stats.files_indexed += 1;
-      stats.chunks_indexed += n;
-      offset += n;
+      stats.chunks_indexed += kept.len();
       tx_count += 1;
 
       if tx_count >= TX_BATCH_SIZE {
@@ -567,6 +617,7 @@ mod tests {
   use crate::{JiebaSegmenter, TextFileReader};
   use semquery_core::{ChunkCandidate, Embedder};
   use semquery_storage::SqliteStorage;
+  use std::fs;
   use tempfile::TempDir;
 
   #[test]
@@ -677,7 +728,7 @@ mod tests {
   async fn test_index_file_basic() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("note.txt");
-    std::fs::write(&path, "hello world").unwrap();
+    fs::write(&path, "hello world").unwrap();
 
     let storage = test_storage();
     let indexer = test_indexer(storage);
@@ -692,7 +743,7 @@ mod tests {
   async fn test_index_file_skip_unchanged() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("note.txt");
-    std::fs::write(&path, "hello world").unwrap();
+    fs::write(&path, "hello world").unwrap();
 
     let storage = test_storage();
     let indexer = test_indexer(storage);
@@ -709,7 +760,7 @@ mod tests {
   async fn test_index_file_reindex_on_change() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("note.txt");
-    std::fs::write(&path, "hello world").unwrap();
+    fs::write(&path, "hello world").unwrap();
 
     let storage = test_storage();
     let indexer = test_indexer(storage);
@@ -717,7 +768,7 @@ mod tests {
     let stats1 = indexer.index_file(&path).await.unwrap();
     assert_eq!(stats1.chunks_indexed, 1);
 
-    std::fs::write(&path, "changed content").unwrap();
+    fs::write(&path, "changed content").unwrap();
     let stats2 = indexer.index_file(&path).await.unwrap();
     assert_eq!(stats2.files_indexed, 1);
     assert_eq!(stats2.chunks_indexed, 1);
@@ -727,9 +778,9 @@ mod tests {
   #[tokio::test]
   async fn test_index_directory() {
     let tmp = TempDir::new().unwrap();
-    std::fs::write(tmp.path().join("a.txt"), "first file").unwrap();
-    std::fs::write(tmp.path().join("b.md"), "second file").unwrap();
-    std::fs::write(tmp.path().join("c.bin"), "binary").unwrap();
+    fs::write(tmp.path().join("a.txt"), "first file").unwrap();
+    fs::write(tmp.path().join("b.md"), "second file").unwrap();
+    fs::write(tmp.path().join("c.bin"), "binary").unwrap();
 
     let storage = test_storage();
     let indexer = test_indexer(storage);
@@ -739,11 +790,78 @@ mod tests {
     assert_eq!(stats.chunks_indexed, 2);
   }
 
+  // Issue #7 repro: two files with identical content must index successfully.
+  // Their chunks share one content hash, so the vector insert used to hit a
+  // primary-key conflict on the sqlite-vec vec0 table and abort the run.
+  #[tokio::test]
+  async fn test_index_duplicate_files_shared_chunk() {
+    let tmp = TempDir::new().unwrap();
+    fs::write(tmp.path().join("a.md"), "Same sentence in two files.").unwrap();
+    fs::write(tmp.path().join("b.md"), "Same sentence in two files.").unwrap();
+
+    let storage = Arc::new(test_storage());
+    let indexer = Indexer::new(IndexerConfig {
+      chunker: Arc::new(StubChunker),
+      embedder: stub_embedder_cell(),
+      segmenter: Arc::new(JiebaSegmenter),
+      storage: storage.clone(),
+      readers: test_readers(),
+      verbose: Verbose(false),
+      embedding_spec: test_embedding_spec(),
+      chunk_size: 1024,
+      chunk_overlap: 102,
+    });
+
+    let stats = indexer.index_directory(tmp.path()).await.unwrap();
+    assert_eq!(stats.files_indexed, 2);
+    assert_eq!(stats.chunks_indexed, 1, "shared chunk must be embedded only once");
+
+    assert_eq!(storage.list_documents().unwrap().len(), 2);
+    assert_eq!(storage.count_chunks().unwrap(), 1);
+    let doc_ids: Vec<String> = storage.list_documents().unwrap().into_iter().map(|d| d.id).collect();
+    let paths = storage.get_document_paths(&doc_ids).unwrap();
+    assert_eq!(paths.len(), 2, "both files must be independently resolvable");
+  }
+
+  // Same dedup, but the duplicate is discovered in a later indexing run
+  // (the chunk is already committed to storage, not just claimed in-batch).
+  #[tokio::test]
+  async fn test_index_duplicate_files_across_runs() {
+    let tmp = TempDir::new().unwrap();
+    let a = tmp.path().join("a.md");
+    let b = tmp.path().join("b.md");
+    fs::write(&a, "dup content").unwrap();
+    fs::write(&b, "dup content").unwrap();
+
+    let storage = Arc::new(test_storage());
+    let indexer = Indexer::new(IndexerConfig {
+      chunker: Arc::new(StubChunker),
+      embedder: stub_embedder_cell(),
+      segmenter: Arc::new(JiebaSegmenter),
+      storage: storage.clone(),
+      readers: test_readers(),
+      verbose: Verbose(false),
+      embedding_spec: test_embedding_spec(),
+      chunk_size: 1024,
+      chunk_overlap: 102,
+    });
+
+    let stats1 = indexer.index_file(&a).await.unwrap();
+    assert_eq!(stats1.chunks_indexed, 1);
+
+    let stats2 = indexer.index_file(&b).await.unwrap();
+    assert_eq!(stats2.files_indexed, 1);
+    assert_eq!(stats2.chunks_indexed, 0, "already-stored chunk must not be re-embedded");
+
+    assert_eq!(storage.count_chunks().unwrap(), 1);
+    assert_eq!(storage.list_documents().unwrap().len(), 2);
+  }
+
   #[tokio::test]
   async fn test_index_directory_removes_deleted_files() {
     let tmp = TempDir::new().unwrap();
-    std::fs::write(tmp.path().join("a.txt"), "first file").unwrap();
-    std::fs::write(tmp.path().join("b.txt"), "second file").unwrap();
+    fs::write(tmp.path().join("a.txt"), "first file").unwrap();
+    fs::write(tmp.path().join("b.txt"), "second file").unwrap();
 
     let storage: Arc<dyn Storage> = Arc::new(test_storage());
     let indexer = Indexer::new(IndexerConfig {
@@ -761,7 +879,7 @@ mod tests {
 
     assert_eq!(storage.list_documents().unwrap().len(), 2);
 
-    std::fs::remove_file(tmp.path().join("a.txt")).unwrap();
+    fs::remove_file(tmp.path().join("a.txt")).unwrap();
 
     let indexer2 = Indexer::new(IndexerConfig {
       chunker: Arc::new(StubChunker),
@@ -786,7 +904,7 @@ mod tests {
   async fn test_index_then_search() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("note.txt");
-    std::fs::write(&path, "分布式共识算法").unwrap();
+    fs::write(&path, "分布式共识算法").unwrap();
 
     let storage = Arc::new(test_storage());
     let indexer = Indexer::new(IndexerConfig {
@@ -811,7 +929,7 @@ mod tests {
   async fn test_model_upgrade_triggers_reembed() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("note.txt");
-    std::fs::write(&path, "hello world").unwrap();
+    fs::write(&path, "hello world").unwrap();
 
     let storage = Arc::new(test_storage());
 

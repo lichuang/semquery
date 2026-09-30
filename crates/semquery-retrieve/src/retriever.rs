@@ -3,22 +3,24 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::pin::pin;
 use std::sync::Arc;
 use std::time::Instant;
 
 use semquery_core::{
   Chunk, EmbedError, Embedder, ModelError, Reranker, Result, RetrieveError, ScoreExplain, ScoredChunk, SearchEvent,
-  SearchHit, SearchStage, SearchStats, SemqError, Storage, Verbose, WordSegmenter,
+  SearchHit, SearchStage, SearchStats, Storage, Verbose, WordSegmenter,
 };
 use tokio::sync::OnceCell;
 use tokio::sync::mpsc::{self, Sender};
+use tokio::task::spawn_blocking;
 use tokio_stream::Stream;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::fusion;
 
-type SearchEventItem = std::result::Result<SearchEvent, SemqError>;
+type SearchEventItem = Result<SearchEvent>;
 type SearchEventSender = Sender<SearchEventItem>;
 
 async fn send_event(tx: &SearchEventSender, event: SearchEvent) -> bool {
@@ -156,7 +158,7 @@ impl Retriever {
     let verbose = self.verbose;
     let query = query.to_string();
 
-    let handle = tokio::task::spawn_blocking(move || {
+    let handle = spawn_blocking(move || {
       let segmented_query = {
         let _step = verbose.start("segment query");
         segmenter.segment(&query)
@@ -349,7 +351,7 @@ impl Retriever {
     self: Arc<Self>,
     query: impl Into<String>,
     top_k: usize,
-  ) -> impl Stream<Item = std::result::Result<SearchEvent, SemqError>> + Send + 'static {
+  ) -> impl Stream<Item = Result<SearchEvent>> + Send + 'static {
     let (tx, rx) = mpsc::channel::<SearchEventItem>(32);
     let query = query.into();
 
@@ -368,12 +370,7 @@ impl Retriever {
   /// Returns `Ok(())` when the pipeline finishes normally or when the downstream
   /// consumer is dropped. Returns `Err` if any stage fails; the spawned caller
   /// forwards that error as the final item on the stream.
-  async fn search_internal(
-    &self,
-    query: &str,
-    top_k: usize,
-    tx: &SearchEventSender,
-  ) -> std::result::Result<(), SemqError> {
+  async fn search_internal(&self, query: &str, top_k: usize, tx: &SearchEventSender) -> Result<()> {
     let total_start = Instant::now();
     let mut stats = SearchStats::default();
 
@@ -551,10 +548,10 @@ impl Retriever {
   /// Folds events from [`Retriever::search_stream`] into the final hit set.
   pub async fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>> {
     let stream = Arc::new(self.clone()).search_stream(query.to_string(), top_k);
-    let mut stream = std::pin::pin!(stream);
+    let mut stream = pin!(stream);
     while let Some(event) = stream.as_mut().next().await {
       match event {
-        Ok(semquery_core::SearchEvent::Completed { hits, .. }) => return Ok(hits),
+        Ok(SearchEvent::Completed { hits, .. }) => return Ok(hits),
         Ok(_) => continue,
         Err(e) => return Err(e),
       }
@@ -590,6 +587,8 @@ mod tests {
   };
   use semquery_indexer::{Indexer, IndexerConfig, JiebaSegmenter, ReaderRegistry, TextFileReader};
   use semquery_storage::SqliteStorage;
+  use std::collections::HashSet;
+  use std::fs;
   use tempfile::TempDir;
 
   struct StubEmbedder {
@@ -637,7 +636,7 @@ mod tests {
     let tmp = TempDir::new().unwrap();
     for (filename, content) in texts.iter() {
       let path = tmp.path().join(filename);
-      std::fs::write(&path, content).unwrap();
+      fs::write(&path, content).unwrap();
       let indexer = Indexer::new(IndexerConfig {
         chunker: Arc::new(StubChunker),
         embedder: stub_embedder_cell(),
@@ -896,14 +895,14 @@ mod tests {
 
     let mut events = Vec::new();
     {
-      let mut stream = std::pin::pin!(stream);
+      let mut stream = pin!(stream);
       while let Some(event) = stream.as_mut().next().await {
         events.push(event.expect("stream must not error"));
       }
     }
 
     // The last event must be Completed with the final hits.
-    let Some(semquery_core::SearchEvent::Completed { hits, stats }) = events.last() else {
+    let Some(SearchEvent::Completed { hits, stats }) = events.last() else {
       panic!("last event must be Completed");
     };
     assert!(!hits.is_empty());
@@ -912,20 +911,20 @@ mod tests {
     // All events before Completed must be StageStarted / StageFinished pairs.
     for ev in &events[..events.len() - 1] {
       match ev {
-        semquery_core::SearchEvent::StageStarted { .. } | semquery_core::SearchEvent::StageFinished { .. } => {}
+        SearchEvent::StageStarted { .. } | SearchEvent::StageFinished { .. } => {}
         other => panic!("unexpected event before Completed: {other:?}"),
       }
     }
 
     // Every StageStarted must have a matching StageFinished for the same stage.
-    let mut started = std::collections::HashSet::new();
-    let mut finished = std::collections::HashSet::new();
+    let mut started = HashSet::new();
+    let mut finished = HashSet::new();
     for ev in &events {
       match ev {
-        semquery_core::SearchEvent::StageStarted { stage } => {
+        SearchEvent::StageStarted { stage } => {
           started.insert(*stage);
         }
-        semquery_core::SearchEvent::StageFinished { stage, .. } => {
+        SearchEvent::StageFinished { stage, .. } => {
           finished.insert(*stage);
         }
         _ => {}

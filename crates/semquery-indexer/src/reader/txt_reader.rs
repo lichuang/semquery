@@ -1,6 +1,8 @@
+use std::fs;
+use std::io::ErrorKind;
 use std::path::Path;
 
-use semquery_core::{FileReader, ParseError, Result};
+use semquery_core::{DocumentSource, FileReader, ParseError, Result};
 
 pub struct TextFileReader {
   extensions: Vec<&'static str>,
@@ -29,19 +31,19 @@ impl FileReader for TextFileReader {
     &self.extensions
   }
 
-  fn read(&self, path: &Path) -> Result<Option<semquery_core::DocumentSource>> {
-    match std::fs::read_to_string(path) {
+  fn read(&self, path: &Path) -> Result<Option<DocumentSource>> {
+    match fs::read_to_string(path) {
       Ok(content) => {
         if content.is_empty() {
           Ok(None)
         } else {
-          Ok(Some(semquery_core::DocumentSource {
+          Ok(Some(DocumentSource {
             path: path.to_path_buf(),
             content,
           }))
         }
       }
-      Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Ok(None),
+      Err(e) if e.kind() == ErrorKind::InvalidData => Ok(None),
       Err(e) => Err(
         ParseError::Io {
           path: path.display().to_string(),

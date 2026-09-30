@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use hf_hub::api::sync::ApiBuilder;
@@ -26,7 +27,7 @@ impl ModelHub {
   /// symbolic revision and a raw commit hash are accepted.
   pub fn is_cached(&self, spec: &ModelSpec) -> bool {
     let repo_dir = self.cache_dir.join(format!("models--{}", spec.repo_id.replace('/', "--")));
-    let commit = std::fs::read_to_string(repo_dir.join("refs").join(&spec.revision))
+    let commit = fs::read_to_string(repo_dir.join("refs").join(&spec.revision))
       .map(|s| s.trim().to_string())
       .unwrap_or_else(|_| spec.revision.clone());
     repo_dir.join("snapshots").join(commit).join(&spec.filename).is_file()

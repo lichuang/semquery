@@ -157,6 +157,13 @@ impl Chunker for SentenceSplitter {
 
         current = overlap_units;
         current_tokens = overlap_tokens;
+        // The carried overlap plus the unit that triggered this split can
+        // exceed chunk_size on its own (overlap is budgeted independently).
+        // Drop the overlap rather than emit an oversized chunk.
+        if current_tokens + unit_tokens > self.chunk_size {
+          current.clear();
+          current_tokens = 0;
+        }
       }
 
       current.push((unit, unit_offset, unit_tokens));
@@ -183,12 +190,13 @@ impl Chunker for SentenceSplitter {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::collections::HashMap;
   use tokenizers::Tokenizer;
   use tokenizers::models::wordlevel::WordLevelBuilder;
   use tokenizers::pre_tokenizers::whitespace::Whitespace;
 
   fn test_tokenizer() -> Tokenizer {
-    let mut vocab = std::collections::HashMap::new();
+    let mut vocab = HashMap::new();
     vocab.insert("[UNK]".to_string(), 0u32);
     vocab.insert("[PAD]".to_string(), 1u32);
     for (i, c) in ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789").chars().enumerate() {
@@ -210,6 +218,29 @@ mod tests {
     assert_eq!(chunks[0].byte_range.start, 0);
     assert_eq!(chunks[0].byte_range.end, text.len());
     assert_eq!(chunks[0].text, text);
+  }
+
+  #[test]
+  fn test_overlap_never_exceeds_chunk_size() {
+    // chunk_size=10, overlap=3. The first sentence (3 tokens) is followed by
+    // a 10-token sentence. After closing chunk 1, the overlap carry (3) plus
+    // the next unit (10) exceeds chunk_size on its own — the overlap must be
+    // dropped instead of emitting a 13-token chunk.
+    // (The test tokenizer maps each unknown word to a single [UNK] token.)
+    let splitter = SentenceSplitter::new(test_tokenizer(), 10, 3);
+    let chunks = splitter.chunk("aa bb cc. dd ee ff gg hh ii jj kk ll mm");
+    assert_eq!(chunks.len(), 2);
+    assert_eq!(chunks[0].text, "aa bb cc.");
+    // The byte range starts right after the previous sentence's period, so a
+    // leading space from the source text is preserved verbatim.
+    assert_eq!(chunks[1].text.trim(), "dd ee ff gg hh ii jj kk ll mm");
+    for c in &chunks {
+      assert!(
+        splitter.token_count(&c.text) <= 10,
+        "chunk exceeds chunk_size: {:?}",
+        c.text
+      );
+    }
   }
 
   #[test]

@@ -1,9 +1,9 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use glob::Pattern;
-use semquery_core::{FileReader, Result};
+use semquery_core::{DocumentSource, FileReader, Result};
 use walkdir::WalkDir;
 
 /// Registry of file readers, keyed by file extension.
@@ -41,8 +41,8 @@ impl ReaderRegistry {
   }
 
   fn find_reader(&self, path: &Path) -> Option<&Arc<dyn FileReader>> {
-    let ext = path.extension()?.to_str()?;
-    let idx = self.ext_map.get(ext)?;
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    let idx = self.ext_map.get(ext.as_str())?;
     self.readers.get(*idx)
   }
 
@@ -54,7 +54,7 @@ impl ReaderRegistry {
   /// Read a single file using the registered reader for its extension.
   /// Returns `None` if the path is ignored, has no registered reader, or the
   /// reader decides to skip the file (e.g. empty content).
-  pub fn read_file(&self, path: &Path) -> Result<Option<semquery_core::DocumentSource>> {
+  pub fn read_file(&self, path: &Path) -> Result<Option<DocumentSource>> {
     if self.is_ignored(path) {
       return Ok(None);
     }
@@ -67,7 +67,7 @@ impl ReaderRegistry {
 
   /// Walk a directory and yield file paths that have a registered reader.
   /// Does NOT read file contents — caller reads on demand.
-  pub fn list_files(&self, path: &Path, recursive: bool) -> Result<Vec<std::path::PathBuf>> {
+  pub fn list_files(&self, path: &Path, recursive: bool) -> Result<Vec<PathBuf>> {
     let walker = if recursive {
       WalkDir::new(path)
     } else {
@@ -92,7 +92,7 @@ impl ReaderRegistry {
 
   /// Walk a directory, dispatch each file to the registered reader that
   /// handles its extension, and collect all `DocumentSource`s.
-  pub fn read_dir(&self, path: &Path, recursive: bool) -> Result<Vec<semquery_core::DocumentSource>> {
+  pub fn read_dir(&self, path: &Path, recursive: bool) -> Result<Vec<DocumentSource>> {
     let mut docs = Vec::new();
     for p in self.list_files(path, recursive)? {
       if let Some(doc) = self.read_file(&p)? {
@@ -114,6 +114,14 @@ mod tests {
     let mut reg = ReaderRegistry::new();
     reg.register(Arc::new(TextFileReader::new()));
     reg
+  }
+
+  #[test]
+  fn test_registry_extension_case_insensitive() {
+    let reg = default_registry();
+    assert!(reg.find_reader(Path::new("notes.MD")).is_some());
+    assert!(reg.find_reader(Path::new("notes.Txt")).is_some());
+    assert!(reg.find_reader(Path::new("notes.unknown")).is_none());
   }
 
   #[test]
@@ -200,8 +208,8 @@ mod tests {
       fn extensions(&self) -> &[&str] {
         &["pdf"]
       }
-      fn read(&self, path: &Path) -> Result<Option<semquery_core::DocumentSource>> {
-        Ok(Some(semquery_core::DocumentSource {
+      fn read(&self, path: &Path) -> Result<Option<DocumentSource>> {
+        Ok(Some(DocumentSource {
           path: path.to_path_buf(),
           content: "extracted pdf text".to_string(),
         }))

@@ -1,18 +1,21 @@
 //! Citation-grounded answer synthesis over retrieved passages.
 
+use std::pin::pin;
 use std::sync::Arc;
 use std::time::Instant;
 
 use futures_core::Stream;
-use semquery_core::{Answer, AskEvent, Citation, Llm, ModelError, Result, SearchEvent, SemqError, Verbose};
+use semquery_core::{Answer, AskEvent, AskStats, Citation, Llm, ModelError, Result, SearchEvent, SearchHit, Verbose};
+use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::OnceCell;
 use tokio::sync::mpsc;
+use tokio::task::block_in_place;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::citation::parse_citations;
 use crate::prompt::build_ask_prompt;
 
-type AskEventItem = std::result::Result<AskEvent, SemqError>;
+type AskEventItem = Result<AskEvent>;
 type AskEventSender = mpsc::Sender<AskEventItem>;
 
 pub struct SynthesizerConfig {
@@ -136,13 +139,13 @@ impl Synthesizer {
     use tokio_stream::StreamExt;
 
     let total_start = Instant::now();
-    let mut stats = semquery_core::AskStats::default();
+    let mut stats = AskStats::default();
 
     let _total = self.verbose.start("ask");
 
     // ---- Retrieve the grounding chunks, forwarding fine-grained stage events ----
-    let mut search = std::pin::pin!(Arc::clone(&self.retriever).search_stream(query, 5));
-    let mut hits: Vec<semquery_core::SearchHit> = Vec::new();
+    let mut search = pin!(Arc::clone(&self.retriever).search_stream(query, 5));
+    let mut hits: Vec<SearchHit> = Vec::new();
     while let Some(event) = search.as_mut().next().await {
       match event? {
         SearchEvent::StageStarted { stage } => {
@@ -207,11 +210,11 @@ impl Synthesizer {
       // `#[tokio::test]`); there we fall back to a best-effort `try_send` —
       // test LLMs emit a single token, so nothing is dropped.
       let multi_thread = matches!(
-        tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()),
-        Ok(tokio::runtime::RuntimeFlavor::MultiThread)
+        Handle::try_current().map(|h| h.runtime_flavor()),
+        Ok(RuntimeFlavor::MultiThread)
       );
       if multi_thread {
-        tokio::task::block_in_place(|| {
+        block_in_place(|| {
           let _ = tx.blocking_send(event);
         });
       } else {
@@ -263,6 +266,7 @@ mod tests {
   use semquery_indexer::{Indexer, IndexerConfig, JiebaSegmenter, ReaderRegistry, TextFileReader};
   use semquery_retrieve::{Retriever, RetrieverConfig};
   use semquery_storage::SqliteStorage;
+  use std::fs;
   use tempfile::TempDir;
 
   struct StubEmbedder {
@@ -341,7 +345,7 @@ mod tests {
     let tmp = TempDir::new().unwrap();
     for (filename, content) in texts.iter() {
       let path = tmp.path().join(filename);
-      std::fs::write(&path, content).unwrap();
+      fs::write(&path, content).unwrap();
       let indexer = Indexer::new(IndexerConfig {
         chunker: Arc::new(StubChunker),
         embedder: stub_embedder_cell(),
@@ -467,7 +471,7 @@ mod tests {
     let mut events: Vec<AskEvent> = Vec::new();
     {
       use tokio_stream::StreamExt;
-      let mut stream = std::pin::pin!(synth.ask_stream("定价方案"));
+      let mut stream = pin!(synth.ask_stream("定价方案"));
       while let Some(event) = stream.as_mut().next().await {
         events.push(event.expect("stream must not error"));
       }

@@ -1,4 +1,6 @@
+use std::ffi::{c_char, c_void};
 use std::num::NonZeroU32;
+use std::ptr::null_mut;
 
 use encoding_rs::UTF_8;
 use llama_cpp_2::context::params::LlamaContextParams;
@@ -13,18 +15,16 @@ use crate::ModelHub;
 
 unsafe extern "C" {
   fn ggml_log_set(
-    callback: Option<
-      unsafe extern "C" fn(level: i32, text: *const std::os::raw::c_char, user_data: *mut std::os::raw::c_void),
-    >,
-    user_data: *mut std::os::raw::c_void,
+    callback: Option<unsafe extern "C" fn(level: i32, text: *const c_char, user_data: *mut c_void)>,
+    user_data: *mut c_void,
   );
 }
 
-unsafe extern "C" fn void_log(_level: i32, _text: *const std::os::raw::c_char, _user_data: *mut std::os::raw::c_void) {}
+unsafe extern "C" fn void_log(_level: i32, _text: *const c_char, _user_data: *mut c_void) {}
 
 fn silence_ggml_logs() {
   unsafe {
-    ggml_log_set(Some(void_log), std::ptr::null_mut());
+    ggml_log_set(Some(void_log), null_mut());
   }
 }
 

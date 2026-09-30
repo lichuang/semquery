@@ -25,6 +25,7 @@ mod tests {
   use semquery_core::{Embedder, ModelRole, ModelSpec, Storage};
   use semquery_storage::SqliteStorage;
   use std::fs;
+  use std::path::Path;
   use tempfile::TempDir;
 
   fn empty_storage() -> SqliteStorage {
@@ -33,13 +34,13 @@ mod tests {
     s
   }
 
-  fn seed_cache_file(cache_dir: &std::path::Path, spec: &ModelSpec, content: &str) {
+  fn seed_cache_file(cache_dir: &Path, spec: &ModelSpec, content: &str) {
     let repo_dir = cache_dir.join(format!("models--{}", spec.repo_id.replace('/', "--")));
     let commit = "fakecommit";
     let snapshot_dir = repo_dir.join("snapshots").join(commit);
     let refs_dir = repo_dir.join("refs");
-    let file_path = std::path::Path::new(&spec.filename);
-    let file_dir = snapshot_dir.join(file_path.parent().unwrap_or(std::path::Path::new("")));
+    let file_path = Path::new(&spec.filename);
+    let file_dir = snapshot_dir.join(file_path.parent().unwrap_or(Path::new("")));
     fs::create_dir_all(&file_dir).unwrap();
     fs::create_dir_all(&refs_dir).unwrap();
     fs::write(snapshot_dir.join(file_path), content).unwrap();

@@ -2,16 +2,19 @@ mod config;
 mod engine;
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::pin::pin;
 use std::process;
 
 use config::{LoggingConfig, SemqConfig};
 
 use clap::{Parser, Subcommand};
 use flexi_logger::{Cleanup, Criterion, DeferredNow, Duplicate, FileSpec, Logger, Naming, Record, WriteMode};
-use semquery_core::{EngineStatus, Storage, Verbose};
+use semquery_core::{Answer, AskEvent, EngineStatus, IndexEvent, Result, SearchEvent, Storage, Verbose};
 use semquery_storage::SqliteStorage;
 use serde::Serialize;
+use tokio_stream::Stream;
 
 pub use engine::{Engine, EngineComponents, EngineConfig};
 
@@ -217,7 +220,7 @@ async fn main() {
 /// Custom log format that prints the target (rather than the module path)
 /// so that verbose progress messages can be emitted with a consistent
 /// `LEVEL [semquery] message` appearance.
-fn log_format(w: &mut dyn std::io::Write, _now: &mut DeferredNow, record: &Record) -> std::io::Result<()> {
+fn log_format(w: &mut dyn io::Write, _now: &mut DeferredNow, record: &Record) -> io::Result<()> {
   write!(w, "{} [{}] {}", record.level(), record.target(), record.args())
 }
 
@@ -385,24 +388,27 @@ async fn run_index(
 /// download progress to stderr along the way.
 async fn drain_index_stream<S>(mut stream: S) -> anyhow::Result<(usize, usize, usize, usize)>
 where
-  S: tokio_stream::Stream<Item = semquery_core::Result<semquery_core::IndexEvent>> + Unpin,
+  S: Stream<Item = Result<IndexEvent>> + Unpin,
 {
   use tokio_stream::StreamExt;
   let mut stats = None;
   while let Some(event) = stream.next().await {
     match event? {
-      semquery_core::IndexEvent::ModelDownloadStart { repo_id, filename, .. } => {
+      IndexEvent::ModelDownloadStart { repo_id, filename, .. } => {
         eprintln!("Downloading model {repo_id}/{filename} ...");
       }
-      semquery_core::IndexEvent::ModelDownloadComplete { elapsed_ms, .. } => {
+      IndexEvent::ModelDownloadComplete { elapsed_ms, .. } => {
         eprintln!("Model downloaded in {elapsed_ms} ms");
       }
-      semquery_core::IndexEvent::Complete {
+      IndexEvent::Complete {
         files,
         chunks,
         files_skipped,
         files_removed,
       } => stats = Some((files, chunks, files_skipped, files_removed)),
+      IndexEvent::Error { message } => {
+        return Err(anyhow::anyhow!("index error: {message}"));
+      }
       _ => {}
     }
   }
@@ -423,17 +429,17 @@ async fn run_search(
   use tokio_stream::StreamExt;
 
   let engine = Engine::open(engine_config(workspace, model_cache, config, verbose))?;
-  let mut stream = std::pin::pin!(engine.search_stream(query, top_k)?);
+  let mut stream = pin!(engine.search_stream(query, top_k)?);
   let mut hits = Vec::new();
   while let Some(event) = stream.next().await {
     match event? {
-      semquery_core::SearchEvent::ModelDownloadStart { repo_id, filename, .. } => {
+      SearchEvent::ModelDownloadStart { repo_id, filename, .. } => {
         eprintln!("Downloading model {repo_id}/{filename} ...");
       }
-      semquery_core::SearchEvent::ModelDownloadComplete { elapsed_ms, .. } => {
+      SearchEvent::ModelDownloadComplete { elapsed_ms, .. } => {
         eprintln!("Model downloaded in {elapsed_ms} ms");
       }
-      semquery_core::SearchEvent::Completed { hits: final_hits, .. } => hits = final_hits,
+      SearchEvent::Completed { hits: final_hits, .. } => hits = final_hits,
       _ => {}
     }
   }
@@ -482,28 +488,28 @@ async fn run_ask(
   use tokio_stream::StreamExt;
 
   let engine = Engine::open(engine_config(workspace, model_cache, config, verbose))?;
-  let mut stream = std::pin::pin!(engine.ask_stream(query)?);
+  let mut stream = pin!(engine.ask_stream(query)?);
 
   let mut buffered_text = String::new();
-  let mut answer: Option<semquery_core::Answer> = None;
+  let mut answer: Option<Answer> = None;
 
   while let Some(event) = stream.as_mut().next().await {
     match event? {
-      semquery_core::AskEvent::Token { delta } => {
+      AskEvent::Token { delta } => {
         if !json {
           print!("{delta}");
           use std::io::Write;
-          std::io::stdout().flush().ok();
+          io::stdout().flush().ok();
         }
         buffered_text.push_str(&delta);
       }
-      semquery_core::AskEvent::AnswerComplete { answer: a, .. } => {
+      AskEvent::AnswerComplete { answer: a, .. } => {
         answer = Some(a);
       }
-      semquery_core::AskEvent::ModelDownloadStart { repo_id, filename, .. } => {
+      AskEvent::ModelDownloadStart { repo_id, filename, .. } => {
         eprintln!("Downloading model {repo_id}/{filename} ...");
       }
-      semquery_core::AskEvent::ModelDownloadComplete { elapsed_ms, .. } => {
+      AskEvent::ModelDownloadComplete { elapsed_ms, .. } => {
         eprintln!("Model downloaded in {elapsed_ms} ms");
       }
       _ => {}
@@ -514,7 +520,7 @@ async fn run_ask(
     match answer {
       Some(a) => print_json(&a),
       None => {
-        print_json(&semquery_core::Answer {
+        print_json(&Answer {
           text: buffered_text,
           citations: Vec::new(),
         });
