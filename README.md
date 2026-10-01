@@ -40,11 +40,8 @@ cargo install --path crates/semquery
 # Create a workspace (uses ~/.config/semq by default)
 semq init
 
-# Add a directory of documents
+# Add a directory — it is indexed immediately and searchable right away
 semq add ~/notes --name notes
-
-# Build the index
-semq index
 
 # Search for passages
 semq search "quarterly revenue"
@@ -69,8 +66,7 @@ The repository includes sample documents under `testdata/` (excerpts from the pu
 
 ```bash
 semq init
-semq add testdata/ --name notes
-semq index
+semq add testdata/ --name notes   # indexed on add
 
 # Search
 semq search "Multi-Paxos improvements"

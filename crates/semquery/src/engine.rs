@@ -227,6 +227,31 @@ impl Engine {
     })
   }
 
+  /// Whether the stored indexing baseline (embedding model spec + chunking
+  /// config) differs from the live config, meaning existing vectors are stale
+  /// and every collection needs a re-embed. Cheap: reads the meta tables
+  /// only, loads no models. Kept in sync with `Indexer::need_reindex`.
+  pub fn need_reindex(&self) -> Result<bool> {
+    let model_changed = match self.storage.get_model_version(ModelRole::Embedding)? {
+      None => false,
+      Some(spec) => {
+        let live = self.config.models.embedding.to_spec(ModelRole::Embedding);
+        spec.repo_id != live.repo_id || spec.filename != live.filename || spec.revision != live.revision
+      }
+    };
+    if model_changed {
+      return Ok(true);
+    }
+    let expected = format!(
+      "{}:{}",
+      self.config.indexing.chunk_size, self.config.indexing.chunk_overlap
+    );
+    Ok(match self.storage.get_meta("indexing")? {
+      Some(value) => value != expected,
+      None => false,
+    })
+  }
+
   pub fn add_collection(&self, name: &str, path: impl AsRef<Path>) -> Result<()> {
     let canonical = fs::canonicalize(path.as_ref())
       .map_err(|e| StoreError::Io(format!("canonicalize {}: {e}", path.as_ref().display())))?;

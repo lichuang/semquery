@@ -57,19 +57,13 @@ struct Cli {
 enum Commands {
   /// Initialize a new workspace.
   Init,
-  /// Add a collection (a directory to be indexed).
+  /// Add a collection (a directory or file) and index it.
   Add {
-    /// Directory path to index.
+    /// Path to index.
     path: PathBuf,
     /// Name for this collection.
     #[arg(long)]
     name: String,
-  },
-  /// Build or update the index.
-  Index {
-    /// Only index the specified collection.
-    #[arg(long)]
-    collection: Option<String>,
   },
   /// Search for passages (zero LLM cost).
   Search {
@@ -297,11 +291,8 @@ async fn run_command(
 
   match cmd {
     Commands::Init => run_init(workspace),
-    Commands::Add { path, name } => run_add(workspace, path, name),
+    Commands::Add { path, name } => run_add(workspace, model_cache, config.clone(), verbose, path, name).await,
     Commands::Status { json } => run_status(workspace, *json),
-    Commands::Index { collection } => {
-      run_index(workspace, model_cache, config.clone(), verbose, collection.as_deref()).await
-    }
     Commands::Search {
       query,
       top_k,
@@ -332,7 +323,14 @@ fn run_init(workspace: &Path) -> anyhow::Result<()> {
   Ok(())
 }
 
-fn run_add(workspace: &Path, path: &Path, name: &str) -> anyhow::Result<()> {
+async fn run_add(
+  workspace: &Path,
+  model_cache: &Path,
+  config: SemqConfig,
+  verbose: Verbose,
+  path: &Path,
+  name: &str,
+) -> anyhow::Result<()> {
   let storage = open_storage(workspace)?;
   let canonical = fs::canonicalize(path)?;
   let path_str = canonical.to_string_lossy().to_string();
@@ -340,6 +338,21 @@ fn run_add(workspace: &Path, path: &Path, name: &str) -> anyhow::Result<()> {
   tx.add_collection(name, &path_str)?;
   tx.commit()?;
   println!("Added collection '{}' -> {}", name, canonical.display());
+
+  // Index immediately so the collection is searchable without a separate
+  // step. If the embedding model / chunking config drifted, every collection
+  // needs a re-embed — do a full pass instead of just the new collection.
+  let engine = Engine::open(engine_config(workspace, model_cache, config, verbose))?;
+  let index_result = if engine.need_reindex()? {
+    eprintln!("embedding model or indexing config changed — reindexing all collections");
+    drain_index_stream(engine.index_stream()?).await
+  } else {
+    drain_index_stream(engine.index_one_stream(name)?).await
+  };
+  let (files, chunks, skipped, removed) = index_result.map_err(|e| {
+    anyhow::anyhow!("collection '{name}' was added but indexing failed: {e}; re-run the same command to retry")
+  })?;
+  println!("Indexed {files} files ({chunks} chunks, {skipped} skipped, {removed} removed)");
   Ok(())
 }
 
@@ -364,23 +377,6 @@ fn run_status(workspace: &Path, json: bool) -> anyhow::Result<()> {
       println!("  {} -> {}", c.name, c.path.display());
     }
   }
-  Ok(())
-}
-
-async fn run_index(
-  workspace: &Path,
-  model_cache: &Path,
-  config: SemqConfig,
-  verbose: Verbose,
-  collection: Option<&str>,
-) -> anyhow::Result<()> {
-  let engine = Engine::open(engine_config(workspace, model_cache, config, verbose))?;
-  let (files, chunks, skipped, removed) = if let Some(name) = collection {
-    drain_index_stream(engine.index_one_stream(name)?).await?
-  } else {
-    drain_index_stream(engine.index_stream()?).await?
-  };
-  println!("Indexed {files} files ({chunks} chunks, {skipped} skipped, {removed} removed)");
   Ok(())
 }
 

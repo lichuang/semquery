@@ -46,14 +46,14 @@ RESET='\033[0m'
 echo -e "\n${GREEN}=== Init (workspace: $WORKSPACE) ===${RESET}"
 "$SEMQ" "${SEMQ_ARGS[@]}" init
 
-echo -e "\n${GREEN}=== Add collection ===${RESET}"
-"$SEMQ" "${SEMQ_ARGS[@]}" add ./testdata/md --name notes
-
-echo -e "\n${GREEN}=== Index ===${RESET}"
-"$SEMQ" "${SEMQ_ARGS[@]}" index -v --log-stdout
+echo -e "\n${GREEN}=== Add collection (indexes on add) ===${RESET}"
+"$SEMQ" "${SEMQ_ARGS[@]}" add ./testdata/md --name notes -v --log-stdout
 
 echo -e "\n${GREEN}=== Ask ===${RESET}"
 "$SEMQ" "${SEMQ_ARGS[@]}" ask "What are the improvements of Multi-Paxos over the Paxos algorithm?" -vv
+
+echo -e "\n${GREEN}=== Ask (Chinese) ===${RESET}"
+"$SEMQ" "${SEMQ_ARGS[@]}" ask "multi paxos 相比 paxos 算法的改进点？" -vv
 
 echo -e "\n${GREEN}=== Search ===${RESET}"
 "$SEMQ" "${SEMQ_ARGS[@]}" search "Multi-Paxos" --explain
