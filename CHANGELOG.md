@@ -1,3 +1,9 @@
+## [0.4.1] - 2026-10-01
+
+### 🐛 Bug Fixes
+
+- *(index)* Skip re-embedding shared content-addressed chunks so duplicate files no longer abort indexing (#7); flatten all inline deep-path references to top-level imports per AGENTS.md style
+- *(index)* Skip re-embedding shared content-addressed chunks so duplicate files no longer abort indexing (#7); flatten all inline deep-path references to top-level imports per AGENTS.md style
 ## [0.4.0] - 2026-09-21
 
 ### 🚀 Features
@@ -10,6 +16,10 @@
 ### 🚜 Refactor
 
 - Rename DocqConfig/DocqError to SemqConfig/SemqError to finish the docq→semquery rename
+
+### 📚 Documentation
+
+- Add CHANGELOG for v0.4.0
 ## [0.3.0] - 2026-09-06
 
 ### 🚀 Features
