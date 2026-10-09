@@ -7,8 +7,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use semquery_core::{
-  Answer, AskEvent, Chunker, Collection, Embedder, EngineStatus, IndexEvent, Llm, LlmConfig, LlmError, ModelRole,
-  ModelSpec, Reranker, Result, SearchEvent, SearchHit, Storage, StoreError, SynthError, Verbose, WordSegmenter,
+  Answer, AskEvent, Chunker, Collection, EMBEDDING_BASELINE_KEY, Embedder, EngineStatus, INDEXING_CONFIG_KEY,
+  IndexEvent, Llm, LlmConfig, LlmError, ModelRole, ModelSpec, Reranker, Result, SearchEvent, SearchHit, Storage,
+  StoreError, SynthError, Verbose, WordSegmenter,
 };
 #[cfg(feature = "docx")]
 use semquery_indexer::DocxReader;
@@ -231,13 +232,18 @@ impl Engine {
   /// config) differs from the live config, meaning existing vectors are stale
   /// and every collection needs a re-embed. Cheap: reads the meta tables
   /// only, loads no models. Kept in sync with `Indexer::need_reindex`.
+  ///
+  /// Reads the baseline `update_index_meta` writes after a successful index
+  /// run — NOT `model_versions`, which `ModelHub::ensure` overwrites with the
+  /// freshly-loaded spec before any comparison could observe the old value
+  /// (issue #8). `None` means no successful run was recorded; also kept false
+  /// for pre-baseline databases whose embeddings match the live config.
   pub fn need_reindex(&self) -> Result<bool> {
-    let model_changed = match self.storage.get_model_version(ModelRole::Embedding)? {
+    let model_changed = match self.storage.get_meta(EMBEDDING_BASELINE_KEY)? {
       None => false,
-      Some(spec) => {
-        let live = self.config.models.embedding.to_spec(ModelRole::Embedding);
-        spec.repo_id != live.repo_id || spec.filename != live.filename || spec.revision != live.revision
-      }
+      Some(json) => serde_json::from_str::<ModelSpec>(&json)
+        .map(|baseline| baseline != self.config.models.embedding.to_spec(ModelRole::Embedding))
+        .unwrap_or_else(|_| true),
     };
     if model_changed {
       return Ok(true);
@@ -246,7 +252,7 @@ impl Engine {
       "{}:{}",
       self.config.indexing.chunk_size, self.config.indexing.chunk_overlap
     );
-    Ok(match self.storage.get_meta("indexing")? {
+    Ok(match self.storage.get_meta(INDEXING_CONFIG_KEY)? {
       Some(value) => value != expected,
       None => false,
     })
@@ -1137,6 +1143,64 @@ mod tests {
     let docs = storage.list_documents().unwrap();
     assert_eq!(docs.len(), 1);
     assert!(storage.get_document(&docs[0].id).unwrap().is_some());
+  }
+
+  /// Regression test for issue #8 (secondary finding "model change still not
+  /// detected"): `Engine::need_reindex` must compare against the baseline
+  /// recorded by the indexer after the last successful run (`meta` key
+  /// `embedding_baseline`), not against `model_versions` — the latter is
+  /// overwritten by `ModelHub::ensure` when the lazy path loads a model, so
+  /// the comparison would degenerate to "new vs new" and never detect the
+  /// change. Here engine2 sees the model change WITHOUT running the indexer
+  /// first, proving the check itself is sound.
+  #[tokio::test]
+  async fn test_engine_need_reindex_detects_model_change() {
+    let tmp = TempDir::new().unwrap();
+
+    // Phase 1: engine with embedding v1 indexes a file; baseline = v1.
+    let mut config_v1 = SemqConfig::default();
+    config_v1.models.embedding.repo_id = "stub/embedding-v1".into();
+    {
+      let engine = Engine::open(EngineConfig {
+        workspace_path: tmp.path().to_path_buf(),
+        model_cache_dir: tmp.path().join("models"),
+        config: config_v1.clone(),
+        verbose: Verbose(false),
+      })
+      .unwrap();
+      engine.storage.init(512).unwrap();
+      assert!(!engine.need_reindex().unwrap(), "fresh workspace has no baseline");
+      assert!(engine.embedder.set(Arc::new(StubEmbedder { dim: 512 }) as Arc<dyn Embedder>).is_ok());
+      assert!(engine.chunker.set(Arc::new(StubChunker)).is_ok());
+
+      let notes_dir = TempDir::new().unwrap();
+      fs::write(notes_dir.path().join("note.txt"), "今天是我的生日").unwrap();
+      engine.add_collection("notes", notes_dir.path()).unwrap();
+      engine.index().await.unwrap();
+      assert!(!engine.need_reindex().unwrap(), "baseline now matches v1 config");
+    }
+
+    // Phase 2: reopen with embedding v2 and confirm the change is detected.
+    let mut config_v2 = SemqConfig::default();
+    config_v2.models.embedding.repo_id = "stub/embedding-v2".into();
+    let engine = Engine::open(EngineConfig {
+      workspace_path: tmp.path().to_path_buf(),
+      model_cache_dir: tmp.path().join("models"),
+      config: config_v2,
+      verbose: Verbose(false),
+    })
+    .unwrap();
+    engine
+      .storage
+      .get_model_version(ModelRole::Embedding)
+      .unwrap()
+      .expect("indexing run recorded the model spec");
+
+    // The engine check reads meta only (no model load): cheap and unpolluted.
+    assert!(
+      engine.need_reindex().unwrap(),
+      "engine must detect the embedding model change against the recorded baseline"
+    );
   }
 
   #[tokio::test]

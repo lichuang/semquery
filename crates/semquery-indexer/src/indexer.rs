@@ -6,8 +6,8 @@ use std::sync::Arc;
 use chrono::Utc;
 use rayon::prelude::*;
 use semquery_core::{
-  Chunk, Chunker, Document, Embedder, IndexEvent, ModelError, ModelRole, ModelSpec, Result, Storage, Verbose,
-  WordSegmenter,
+  Chunk, Chunker, Document, EMBEDDING_BASELINE_KEY, Embedder, INDEXING_CONFIG_KEY, IndexEvent, ModelError, ModelRole,
+  ModelSpec, Result, Storage, StoreError, Verbose, WordSegmenter,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -144,23 +144,24 @@ impl Indexer {
   }
 
   fn need_reindex(&self) -> Result<bool> {
-    // `None` means this storage has never recorded indexing meta — a fresh
-    // workspace has nothing to re-embed. The meta is written after this run
-    // by `update_index_meta`, so treating `None` as "changed" would force
-    // the re-embed path (and disable shared-chunk dedup) on every first run.
-    let model_changed = match self.storage.get_model_version(ModelRole::Embedding)? {
+    // Baseline is the spec recorded after the last *successful* index run
+    // (`update_index_meta`), never the spec `ModelHub::ensure` writes on
+    // model load — the latter is overwritten before any comparison happens,
+    // which would turn the check into "new vs new".
+    // `None` means no successful run was ever recorded: a fresh workspace
+    // has nothing to re-embed, and pre-baseline databases (<= 0.4.1) whose
+    // embeddings match live config must not be force-reindexed either.
+    let model_changed = match self.storage.get_meta(EMBEDDING_BASELINE_KEY)? {
       None => false,
-      Some(spec) => {
-        spec.repo_id != self.embedding_spec.repo_id
-          || spec.filename != self.embedding_spec.filename
-          || spec.revision != self.embedding_spec.revision
-      }
+      Some(json) => serde_json::from_str::<ModelSpec>(&json)
+        .map(|baseline| baseline != self.embedding_spec)
+        .unwrap_or_else(|_| true),
     };
     if model_changed {
       return Ok(true);
     }
     let expected_chunk = format!("{}:{}", self.chunk_size, self.chunk_overlap);
-    let chunk_changed = match self.storage.get_meta("indexing")? {
+    let chunk_changed = match self.storage.get_meta(INDEXING_CONFIG_KEY)? {
       Some(value) => value != expected_chunk,
       None => false,
     };
@@ -169,7 +170,11 @@ impl Indexer {
 
   fn update_index_meta(&self) -> Result<()> {
     self.storage.set_model_version_atomic(ModelRole::Embedding, &self.embedding_spec)?;
-    self.storage.set_meta_atomic("indexing", &format!("{}:{}", self.chunk_size, self.chunk_overlap))?;
+    let baseline = serde_json::to_string(&self.embedding_spec)
+      .map_err(|e| StoreError::Io(format!("serialize embedding baseline: {e}")))?;
+    self.storage.set_meta_atomic(EMBEDDING_BASELINE_KEY, &baseline)?;
+    let indexing = format!("{}:{}", self.chunk_size, self.chunk_overlap);
+    self.storage.set_meta_atomic(INDEXING_CONFIG_KEY, &indexing)?;
     Ok(())
   }
 
@@ -1015,6 +1020,78 @@ mod tests {
       chunk_size: 1024,
       chunk_overlap: 102,
     })
+  }
+
+  /// Regression test for issue #8 (secondary finding "model change still not
+  /// detected"): `ModelHub::ensure` writes the freshly-loaded spec into
+  /// `model_versions` BEFORE `need_reindex` compares against it, turning the
+  /// check into "new vs new". `need_reindex` must therefore read the
+  /// baseline recorded by `update_index_meta` after the last successful run,
+  /// not `model_versions`.
+  ///
+  /// The overwrite done here via `set_model_version_atomic` mirrors exactly
+  /// what the lazy-loading path does on first use.
+  #[tokio::test]
+  async fn test_need_reindex_ignores_model_versions_overwrite() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("note.txt");
+    fs::write(&path, "hello world").unwrap();
+
+    let storage = Arc::new(test_storage());
+
+    let spec_v1 = ModelSpec {
+      role: ModelRole::Embedding,
+      repo_id: "stub/embedding-v1".into(),
+      filename: "model.onnx".into(),
+      revision: "main".into(),
+      checksum: None,
+    };
+    let indexer_v1 = Indexer::new(IndexerConfig {
+      chunker: Arc::new(StubChunker),
+      embedder: stub_embedder_cell(),
+      segmenter: Arc::new(JiebaSegmenter),
+      storage: storage.clone(),
+      readers: test_readers(),
+      verbose: Verbose(false),
+      embedding_spec: spec_v1,
+      chunk_size: 1024,
+      chunk_overlap: 102,
+    });
+    assert!(!indexer_v1.need_reindex().unwrap(), "fresh workspace: no baseline yet");
+    indexer_v1.index_file(&path).await.unwrap();
+    assert!(!indexer_v1.need_reindex().unwrap(), "baseline now matches v1");
+
+    // The lazy-loading path overwrites `model_versions` with the NEW spec
+    // before any comparison can observe the old value.
+    let spec_v2 = ModelSpec {
+      role: ModelRole::Embedding,
+      repo_id: "stub/embedding-v2".into(),
+      filename: "model.onnx".into(),
+      revision: "main".into(),
+      checksum: None,
+    };
+    storage.set_model_version_atomic(ModelRole::Embedding, &spec_v2).unwrap();
+
+    let indexer_v2 = Indexer::new(IndexerConfig {
+      chunker: Arc::new(StubChunker),
+      embedder: stub_embedder_cell(),
+      segmenter: Arc::new(JiebaSegmenter),
+      storage: storage.clone(),
+      readers: test_readers(),
+      verbose: Verbose(false),
+      embedding_spec: spec_v2.clone(),
+      chunk_size: 1024,
+      chunk_overlap: 102,
+    });
+    assert!(
+      indexer_v2.need_reindex().unwrap(),
+      "model change must be detected even after model_versions was overwritten by ensure"
+    );
+
+    // After a successful v2 run the baseline catches up and the check goes quiet.
+    let stats = indexer_v2.index_file(&path).await.unwrap();
+    assert_eq!(stats.files_indexed, 1, "changed model forces re-embedding");
+    assert!(!indexer_v2.need_reindex().unwrap(), "baseline now matches v2");
   }
 
   async fn drain_index(
