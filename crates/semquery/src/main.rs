@@ -65,6 +65,9 @@ enum Commands {
     #[arg(long)]
     name: String,
   },
+  /// Removed: indexing now runs automatically during `semq add`. Kept only to
+  /// hint old scripts instead of failing with `unrecognized subcommand`.
+  Index,
   /// Search for passages (zero LLM cost).
   Search {
     /// Query string.
@@ -291,6 +294,7 @@ async fn run_command(
 
   match cmd {
     Commands::Init => run_init(workspace),
+    Commands::Index => run_index_hint(),
     Commands::Add { path, name } => run_add(workspace, model_cache, config.clone(), verbose, path, name).await,
     Commands::Status { json } => run_status(workspace, *json),
     Commands::Search {
@@ -321,6 +325,14 @@ fn run_init(workspace: &Path) -> anyhow::Result<()> {
   storage.init(0)?;
   println!("Initialized workspace at {}", workspace.display());
   Ok(())
+}
+
+fn run_index_hint() -> anyhow::Result<()> {
+  eprintln!(
+    "The `index` command was removed: `semq add <path> --name <name>` now indexes the collection automatically."
+  );
+  eprintln!("Nothing to do — run `semq add` (re-running it is safe and incremental), then `semq search` / `semq ask`.");
+  process::exit(1);
 }
 
 async fn run_add(

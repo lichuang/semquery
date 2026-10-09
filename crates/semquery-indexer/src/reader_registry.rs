@@ -72,7 +72,8 @@ impl ReaderRegistry {
       WalkDir::new(path)
     } else {
       WalkDir::new(path).max_depth(1)
-    };
+    }
+    .sort_by_file_name();
 
     let mut paths = Vec::new();
     for entry in walker.into_iter().filter_entry(|e| e.depth() == 0 || !self.is_ignored(e.path())) {

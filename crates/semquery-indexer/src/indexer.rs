@@ -1163,32 +1163,42 @@ mod tests {
 
   #[tokio::test]
   async fn test_repro_issue_8_copy_and_rewrite_original() {
-    let tmp = TempDir::new().unwrap();
-    let report = tmp.path().join("report.md");
-    fs::write(&report, "alpha line\nbeta line\n").unwrap();
+    // A single directory keeps the updated original and its copy in the SAME
+    // flush_batch — the precondition of the issue #8 foreign-key bug. Names
+    // are prefixed a-/b- so the sorted walk (see `list_files`) fixes a
+    // deterministic order per loop step: `original_first` = the exact order
+    // that used to fail, and the other order must stay healthy in both code
+    // versions.
+    for (original_file, copy_file) in [("a-report.md", "b-copy.md"), ("b-report.md", "a-copy.md")] {
+      let tmp = TempDir::new().unwrap();
+      let report = tmp.path().join(original_file);
+      fs::write(&report, "alpha line\nbeta line\n").unwrap();
 
-    let storage = Arc::new(test_storage());
-    let indexer = issue8_indexer(&storage);
+      let storage = Arc::new(test_storage());
+      let indexer = issue8_indexer(&storage);
 
-    let (_stats, err) =
-      drain_index(indexer.index_sources_stream(vec![("docs".into(), tmp.path().to_path_buf())])).await;
-    assert!(err.is_none(), "first index must succeed, got: {err:?}");
-    assert_eq!(storage.count_chunks().unwrap(), 2);
+      let (_stats, err) =
+        drain_index(indexer.index_sources_stream(vec![("docs".into(), tmp.path().to_path_buf())])).await;
+      assert!(err.is_none(), "first index must succeed, got: {err:?}");
+      assert_eq!(storage.count_chunks().unwrap(), 2);
 
-    // Keep the old version under a new name, then rewrite the original: the
-    // copy still needs the old chunks while the original drops them.
-    fs::copy(&report, tmp.path().join("old-report.md")).unwrap();
-    fs::write(&report, "brand new wording\n").unwrap();
+      // Keep the old version under a new name, then rewrite the original: the
+      // copy still needs the old chunks while the original drops them.
+      let copy_path = tmp.path().join(copy_file);
+      fs::copy(&report, &copy_path).unwrap();
+      fs::write(&report, "brand new wording\n").unwrap();
 
-    let (stats, err) = drain_index(indexer.index_sources_stream(vec![("docs".into(), tmp.path().to_path_buf())])).await;
+      let (stats, err) =
+        drain_index(indexer.index_sources_stream(vec![("docs".into(), tmp.path().to_path_buf())])).await;
 
-    assert!(err.is_none(), "copy + rewrite must not fail, got: {err:?}");
-    assert_eq!(stats.expect("must emit Complete").files_indexed, 2);
-    assert_eq!(storage.list_documents().unwrap().len(), 2);
-    assert_eq!(
-      storage.count_chunks().unwrap(),
-      3,
-      "2 old chunks kept by the copy + 1 new chunk for the rewritten original"
-    );
+      assert!(err.is_none(), "copy + rewrite must not fail, got: {err:?}");
+      assert_eq!(stats.expect("must emit Complete").files_indexed, 2);
+      assert_eq!(storage.list_documents().unwrap().len(), 2);
+      assert_eq!(
+        storage.count_chunks().unwrap(),
+        3,
+        "2 old chunks kept by the copy + 1 new chunk for the rewritten original"
+      );
+    }
   }
 }

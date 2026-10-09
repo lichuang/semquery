@@ -3,7 +3,11 @@
 ### 🐛 Bug Fixes
 
 - *(index)* Skip re-embedding shared content-addressed chunks so duplicate files no longer abort indexing (#7); flatten all inline deep-path references to top-level imports per AGENTS.md style
-- *(index)* Skip re-embedding shared content-addressed chunks so duplicate files no longer abort indexing (#7); flatten all inline deep-path references to top-level imports per AGENTS.md style
+
+### ⚠️ Breaking Changes
+
+- *(cli)* Removed `semq index` subcommand — indexing now happens automatically during `semq add`; scripts calling `semq index` must switch to `semq add <path> --name <name>` (the subcommand was later restored as a print-only hint, exit 1)
+
 ## [0.4.0] - 2026-09-21
 
 ### 🚀 Features
