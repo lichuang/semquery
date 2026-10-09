@@ -104,6 +104,12 @@ pub trait StorageTx {
   fn delete_document(&mut self, doc_id: &str) -> Result<()>;
   fn add_chunks(&mut self, chunks: &[Chunk]) -> Result<()>;
   fn add_chunk_documents(&mut self, chunk_ids: &[String], doc_id: &str) -> Result<()>;
+  /// Unlink this document's chunks without deleting them; shared chunks survive.
+  fn unlink_chunks_by_doc(&mut self, doc_id: &str) -> Result<()>;
+  /// Delete chunks (plus vectors / FTS rows) that no document references.
+  fn sweep_orphan_chunks(&mut self) -> Result<()>;
+  /// Unlink a document's chunks and sweep the orphans immediately. For whole-
+  /// document deletion only; mid-reindex use [`StorageTx::unlink_chunks_by_doc`].
   fn delete_chunks_by_doc(&mut self, doc_id: &str) -> Result<()>;
   fn add_vectors(&mut self, chunk_ids: &[String], embeddings: &[Vec<f32>]) -> Result<()>;
   fn add_fts_chunks(&mut self, chunk_ids: &[String], tokenized_texts: &[String]) -> Result<()>;

@@ -192,9 +192,12 @@ fn delete_document(conn: &Connection, doc_id: &str) -> rusqlite::Result<()> {
   Ok(())
 }
 
-fn delete_chunks_by_doc(conn: &Connection, doc_id: &str) -> rusqlite::Result<()> {
+fn unlink_chunks_by_doc(conn: &Connection, doc_id: &str) -> rusqlite::Result<()> {
   conn.execute("DELETE FROM chunk_documents WHERE doc_id = ?1", params![doc_id])?;
+  Ok(())
+}
 
+fn sweep_orphan_chunks(conn: &Connection) -> rusqlite::Result<()> {
   let orphaned = "chunk_id NOT IN (SELECT chunk_id FROM chunk_documents)";
   conn.execute(
     &format!("DELETE FROM vec_chunks WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE {orphaned})"),
@@ -206,6 +209,11 @@ fn delete_chunks_by_doc(conn: &Connection, doc_id: &str) -> rusqlite::Result<()>
   )?;
   conn.execute(&format!("DELETE FROM chunks WHERE {orphaned}"), [])?;
   Ok(())
+}
+
+fn delete_chunks_by_doc(conn: &Connection, doc_id: &str) -> rusqlite::Result<()> {
+  unlink_chunks_by_doc(conn, doc_id)?;
+  sweep_orphan_chunks(conn)
 }
 
 fn set_model_version(conn: &Connection, role: ModelRole, version: &ModelSpec) -> rusqlite::Result<()> {
@@ -617,6 +625,18 @@ impl StorageTx for SqliteTransaction {
   fn add_chunk_documents(&mut self, chunk_ids: &[String], doc_id: &str) -> Result<()> {
     let conn = self.conn.lock().map_err(|_| poisoned())?;
     insert_chunk_documents(&conn, chunk_ids, doc_id).map_err(map_rusqlite)?;
+    Ok(())
+  }
+
+  fn unlink_chunks_by_doc(&mut self, doc_id: &str) -> Result<()> {
+    let conn = self.conn.lock().map_err(|_| poisoned())?;
+    unlink_chunks_by_doc(&conn, doc_id).map_err(map_rusqlite)?;
+    Ok(())
+  }
+
+  fn sweep_orphan_chunks(&mut self) -> Result<()> {
+    let conn = self.conn.lock().map_err(|_| poisoned())?;
+    sweep_orphan_chunks(&conn).map_err(map_rusqlite)?;
     Ok(())
   }
 

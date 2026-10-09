@@ -583,7 +583,7 @@ impl Indexer {
       offset += kept.len();
 
       if pf.is_update {
-        tx.delete_chunks_by_doc(&pf.doc.id)?;
+        tx.unlink_chunks_by_doc(&pf.doc.id)?;
       }
       tx.add_document(&pf.doc)?;
       tx.set_document_path(&pf.doc.id, &pf.path.to_string_lossy())?;
@@ -603,9 +603,11 @@ impl Indexer {
       }
     }
 
-    if tx_count > 0 {
-      tx.commit()?;
-    }
+    // Sweep only after every file in the batch has been linked: an update
+    // unlinks its old chunks but a shared chunk may still be claimed by a
+    // later file (or the updated file's own unchanged chunks).
+    tx.sweep_orphan_chunks()?;
+    tx.commit()?;
 
     Ok(stats)
   }
@@ -980,5 +982,136 @@ mod tests {
 
     let recorded = storage.get_model_version(ModelRole::Embedding).unwrap().unwrap();
     assert_eq!(recorded.repo_id, "stub/embedding-v2");
+  }
+
+  struct LineChunker;
+
+  impl Chunker for LineChunker {
+    fn chunk(&self, text: &str) -> Vec<ChunkCandidate> {
+      let mut chunks = Vec::new();
+      let mut offset = 0usize;
+      for line in text.split('\n') {
+        if !line.trim().is_empty() {
+          chunks.push(ChunkCandidate {
+            text: line.to_string(),
+            byte_range: offset..offset + line.len(),
+          });
+        }
+        offset += line.len() + 1;
+      }
+      chunks
+    }
+  }
+
+  fn issue8_indexer(storage: &Arc<SqliteStorage>) -> Indexer {
+    Indexer::new(IndexerConfig {
+      chunker: Arc::new(LineChunker),
+      embedder: stub_embedder_cell(),
+      segmenter: Arc::new(JiebaSegmenter),
+      storage: storage.clone(),
+      readers: test_readers(),
+      verbose: Verbose(false),
+      embedding_spec: test_embedding_spec(),
+      chunk_size: 1024,
+      chunk_overlap: 102,
+    })
+  }
+
+  async fn drain_index(
+    mut stream: impl Stream<Item = Result<IndexEvent>> + Unpin,
+  ) -> (Option<IndexStats>, Option<String>) {
+    let mut stats = None;
+    let mut error = None;
+    while let Some(event) = stream.next().await {
+      match event {
+        Ok(IndexEvent::Complete {
+          files,
+          chunks,
+          files_skipped,
+          files_removed,
+        }) => {
+          stats = Some(IndexStats {
+            files_indexed: files,
+            chunks_indexed: chunks,
+            files_skipped,
+            files_removed,
+          });
+        }
+        Ok(IndexEvent::Error { message }) => error = Some(message),
+        Ok(_) => {}
+        Err(e) => error = Some(e.to_string()),
+      }
+    }
+    (stats, error)
+  }
+
+  /// Regression test for https://github.com/lichuang/semquery/issues/8
+  /// ("routine edits make `add` fail with `FOREIGN KEY constraint failed`").
+  ///
+  /// Repro: index a 3-line file (3 chunks), then append a 4th line. The first
+  /// three chunks are unchanged, so `flush_batch` puts them in `existing` and
+  /// only embeds the new one. The old code then called `delete_chunks_by_doc`,
+  /// which both unlinked the document AND swept the chunks left unreferenced —
+  /// deleting those three unchanged chunks before `add_chunk_documents` tried
+  /// to re-link them. The re-link hit a dangling foreign key and the whole
+  /// `add` run aborted. The fix splits unlink from sweep and defers the sweep
+  /// until every file in the batch has been linked.
+  #[tokio::test]
+  async fn test_repro_issue_8_append_multi_chunk_file() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("note.md");
+    fs::write(&path, "alpha line\nbeta line\ngamma line\n").unwrap();
+
+    let storage = Arc::new(test_storage());
+    let indexer = issue8_indexer(&storage);
+
+    let (stats1, err1) =
+      drain_index(indexer.index_sources_stream(vec![("docs".into(), tmp.path().to_path_buf())])).await;
+    assert!(err1.is_none(), "first index must succeed, got: {err1:?}");
+    assert_eq!(stats1.unwrap().chunks_indexed, 3, "3 lines -> 3 chunks");
+    assert_eq!(storage.count_chunks().unwrap(), 3);
+
+    fs::write(&path, "alpha line\nbeta line\ngamma line\ndelta line\n").unwrap();
+
+    let (stats2, err2) =
+      drain_index(indexer.index_sources_stream(vec![("docs".into(), tmp.path().to_path_buf())])).await;
+
+    assert!(err2.is_none(), "append edit must not fail, got: {err2:?}");
+    let stats2 = stats2.expect("append edit must emit Complete");
+    assert_eq!(stats2.files_indexed, 1);
+    assert_eq!(stats2.chunks_indexed, 1, "only the new line is embedded");
+    assert_eq!(storage.count_chunks().unwrap(), 4, "3 unchanged + 1 new chunk");
+    assert_eq!(storage.list_documents().unwrap().len(), 1);
+  }
+
+  #[tokio::test]
+  async fn test_repro_issue_8_copy_and_rewrite_original() {
+    let tmp = TempDir::new().unwrap();
+    let report = tmp.path().join("report.md");
+    fs::write(&report, "alpha line\nbeta line\n").unwrap();
+
+    let storage = Arc::new(test_storage());
+    let indexer = issue8_indexer(&storage);
+
+    let (_stats, err) =
+      drain_index(indexer.index_sources_stream(vec![("docs".into(), tmp.path().to_path_buf())])).await;
+    assert!(err.is_none(), "first index must succeed, got: {err:?}");
+    assert_eq!(storage.count_chunks().unwrap(), 2);
+
+    // Keep the old version under a new name, then rewrite the original: the
+    // copy still needs the old chunks while the original drops them.
+    fs::copy(&report, tmp.path().join("old-report.md")).unwrap();
+    fs::write(&report, "brand new wording\n").unwrap();
+
+    let (stats, err) = drain_index(indexer.index_sources_stream(vec![("docs".into(), tmp.path().to_path_buf())])).await;
+
+    assert!(err.is_none(), "copy + rewrite must not fail, got: {err:?}");
+    assert_eq!(stats.expect("must emit Complete").files_indexed, 2);
+    assert_eq!(storage.list_documents().unwrap().len(), 2);
+    assert_eq!(
+      storage.count_chunks().unwrap(),
+      3,
+      "2 old chunks kept by the copy + 1 new chunk for the rewritten original"
+    );
   }
 }
