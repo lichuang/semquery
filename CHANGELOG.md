@@ -1,13 +1,24 @@
+## [0.4.2] - 2026-10-10
+
+### 🐛 Bug Fixes
+
+- *(index)* Fix FOREIGN KEY constraint failed on routine edits (#8) by splitting StorageTx unlink from orphan sweep — updates now only unlink_chunks_by_doc and a single sweep_orphan_chunks runs after the whole batch is re-linked
+- *(index)* Detect embedding-model changes reliably (#8) — need_reindex now compares against a meta "embedding_baseline" written only by update_index_meta after a successful run, instead of model_versions which ModelHub::ensure overwrites with the freshly-loaded spec before any comparison; meta keys centralized in semquery-core meta_keys.rs (indexing config promoted from a magic string)
+- *(index)* Make issue #8 repro-2 regression test order-deterministic (sorted WalkDir via list_files, fixed two-order check instead of readdir-dependent single order) and restore `semq index` as a stub that prints removal guidance; doc(changelog): remove duplicated #7 entry and record the 0.4.1 semq-index removal breaking change
 ## [0.4.1] - 2026-10-01
 
 ### 🐛 Bug Fixes
 
 - *(index)* Skip re-embedding shared content-addressed chunks so duplicate files no longer abort indexing (#7); flatten all inline deep-path references to top-level imports per AGENTS.md style
 
-### ⚠️ Breaking Changes
+### 📚 Documentation
 
-- *(cli)* Removed `semq index` subcommand — indexing now happens automatically during `semq add`; scripts calling `semq index` must switch to `semq add <path> --name <name>` (the subcommand was later restored as a print-only hint, exit 1)
+- Add CHANGELOG for v0.4.1
 
+### ⚙️ Miscellaneous Tasks
+
+- Bump to v0.4.1
+- Sync Cargo.lock for v0.4.1
 ## [0.4.0] - 2026-09-21
 
 ### 🚀 Features
