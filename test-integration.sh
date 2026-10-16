@@ -61,4 +61,22 @@ echo -e "\n${GREEN}=== Search ===${RESET}"
 echo -e "\n${GREEN}=== Status ===${RESET}"
 "$SEMQ" "${SEMQ_ARGS[@]}" status
 
+echo -e "\n${GREEN}=== Delete a single document (del --file) ===${RESET}"
+"$SEMQ" "${SEMQ_ARGS[@]}" del --file ./testdata/md/forward.md
+
+echo -e "\n${GREEN}=== Status after deleting one document ===${RESET}"
+"$SEMQ" "${SEMQ_ARGS[@]}" status
+
+echo -e "\n${GREEN}=== Delete the collection (del) ===${RESET}"
+"$SEMQ" "${SEMQ_ARGS[@]}" del notes
+
+echo -e "\n${GREEN}=== Status after deleting the collection ===${RESET}"
+"$SEMQ" "${SEMQ_ARGS[@]}" status
+
+echo -e "\n${GREEN}=== Search after deletion ===${RESET}"
+"$SEMQ" "${SEMQ_ARGS[@]}" search "Multi-Paxos"
+
+echo -e "\n${GREEN}=== Ask after deletion ===${RESET}"
+"$SEMQ" "${SEMQ_ARGS[@]}" ask "What are the improvements of Multi-Paxos over the Paxos algorithm?" -vv
+
 echo -e "\n${GREEN}=== Done ===${RESET}"

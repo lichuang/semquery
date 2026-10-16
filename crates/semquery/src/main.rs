@@ -65,6 +65,19 @@ enum Commands {
     #[arg(long)]
     name: String,
   },
+  /// Delete an indexed collection, or a single document with --file, from the
+  /// index. The files on disk are never touched.
+  #[command(visible_alias = "remove")]
+  Del {
+    /// Name of the collection to delete.
+    name: Option<String>,
+    /// Delete a single indexed document by its file path instead of a collection.
+    #[arg(long, value_name = "PATH", conflicts_with = "name")]
+    file: Option<PathBuf>,
+    /// Output JSON to stdout.
+    #[arg(long)]
+    json: bool,
+  },
   /// Removed: indexing now runs automatically during `semq add`. Kept only to
   /// hint old scripts instead of failing with `unrecognized subcommand`.
   Index,
@@ -296,6 +309,15 @@ async fn run_command(
     Commands::Init => run_init(workspace),
     Commands::Index => run_index_hint(),
     Commands::Add { path, name } => run_add(workspace, model_cache, config.clone(), verbose, path, name).await,
+    Commands::Del { name, file, json } => run_del(
+      workspace,
+      model_cache,
+      config.clone(),
+      verbose,
+      name.as_deref(),
+      file.as_deref(),
+      *json,
+    ),
     Commands::Status { json } => run_status(workspace, *json),
     Commands::Search {
       query,
@@ -365,6 +387,42 @@ async fn run_add(
     anyhow::anyhow!("collection '{name}' was added but indexing failed: {e}; re-run the same command to retry")
   })?;
   println!("Indexed {files} files ({chunks} chunks, {skipped} skipped, {removed} removed)");
+  Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_del(
+  workspace: &Path,
+  model_cache: &Path,
+  config: SemqConfig,
+  verbose: Verbose,
+  name: Option<&str>,
+  file: Option<&Path>,
+  json: bool,
+) -> anyhow::Result<()> {
+  let engine = Engine::open(engine_config(workspace, model_cache, config, verbose))?;
+  match (name, file) {
+    (Some(name), None) => {
+      engine.del(name)?;
+      if json {
+        print_json(&serde_json::json!({ "deleted": "collection", "name": name }));
+      } else {
+        println!("Deleted collection '{name}' and its indexed data (files on disk are untouched).");
+      }
+    }
+    (None, Some(path)) => {
+      engine.del_document(path)?;
+      if json {
+        print_json(&serde_json::json!({ "deleted": "document", "path": path.display().to_string() }));
+      } else {
+        println!(
+          "Deleted document {} from the index (file on disk is untouched).",
+          path.display()
+        );
+      }
+    }
+    _ => return Err(anyhow::anyhow!("specify exactly one of <name> or --file <PATH>")),
+  }
   Ok(())
 }
 
