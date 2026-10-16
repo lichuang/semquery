@@ -281,16 +281,81 @@ impl Engine {
     self.add_collection(name, &canonical)
   }
 
-  pub fn remove_collection(&self, name: &str) -> Result<()> {
+  /// Delete a collection by name together with the indexed data it solely
+  /// owns: its registration, every document under its path that no other
+  /// collection also covers, and the chunks / vectors left orphaned.
+  /// Documents shared with a surviving collection are kept.
+  pub fn del(&self, name: &str) -> Result<()> {
+    let collections = self.storage.list_collections()?;
+    let target_path = collections
+      .iter()
+      .find(|c| c.name == name)
+      .map(|c| c.path.clone())
+      .ok_or_else(|| StoreError::NotFound(name.to_string()))?;
+    let surviving: Vec<PathBuf> = collections.iter().filter(|c| c.name != name).map(|c| c.path.clone()).collect();
+
+    let docs = self.storage.list_documents()?;
+    let ids: Vec<String> = docs.iter().map(|d| d.id.clone()).collect();
+    let paths = self.storage.get_document_paths(&ids)?;
+    let doomed: Vec<String> = docs
+      .iter()
+      .filter(|d| {
+        paths.get(&d.id).is_some_and(|p| {
+          let p = Path::new(p);
+          p.starts_with(&target_path) && !surviving.iter().any(|root| p.starts_with(root))
+        })
+      })
+      .map(|d| d.id.clone())
+      .collect();
+
     let mut tx = self.storage.begin_tx()?;
     tx.delete_collection(name)?;
+    for id in &doomed {
+      tx.unlink_chunks_by_doc(id)?;
+      tx.delete_document(id)?;
+    }
+    tx.sweep_orphan_chunks()?;
     tx.commit()?;
     Ok(())
   }
 
+  /// Delete a single indexed document by file path along with its chunks.
+  /// Chunks shared with other documents are kept.
+  pub fn del_document(&self, path: impl AsRef<Path>) -> Result<()> {
+    let canonical = fs::canonicalize(path.as_ref())
+      .map_err(|e| StoreError::Io(format!("canonicalize {}: {e}", path.as_ref().display())))?;
+    let docs = self.storage.list_documents()?;
+    let ids: Vec<String> = docs.iter().map(|d| d.id.clone()).collect();
+    let paths = self.storage.get_document_paths(&ids)?;
+    let doc_id = docs
+      .iter()
+      .find(|d| paths.get(&d.id).is_some_and(|p| Path::new(p) == canonical.as_path()))
+      .map(|d| d.id.clone())
+      .ok_or_else(|| StoreError::NotFound(canonical.display().to_string()))?;
+
+    let mut tx = self.storage.begin_tx()?;
+    tx.unlink_chunks_by_doc(&doc_id)?;
+    tx.delete_document(&doc_id)?;
+    tx.sweep_orphan_chunks()?;
+    tx.commit()?;
+    Ok(())
+  }
+
+  /// Alias of [`Engine::del`].
+  pub fn remove_collection(&self, name: &str) -> Result<()> {
+    self.del(name)
+  }
+
+  /// Remove every collection and all indexed documents / chunks.
   pub fn clear_collections(&self) -> Result<()> {
+    let docs = self.storage.list_documents()?;
     let mut tx = self.storage.begin_tx()?;
     tx.clear_collections()?;
+    for doc in &docs {
+      tx.unlink_chunks_by_doc(&doc.id)?;
+      tx.delete_document(&doc.id)?;
+    }
+    tx.sweep_orphan_chunks()?;
     tx.commit()?;
     Ok(())
   }
@@ -856,6 +921,86 @@ mod tests {
     let status = engine.status().unwrap();
     assert_eq!(status.collections.len(), 1);
     assert_eq!(status.documents, 0);
+  }
+
+  #[tokio::test]
+  async fn test_engine_del_removes_collection_and_indexed_data() {
+    let tmp = TempDir::new().unwrap();
+    let engine = Engine::new(test_components(test_storage(&tmp)));
+
+    let notes_dir = TempDir::new().unwrap();
+    fs::write(notes_dir.path().join("a.txt"), "今天是我的生日").unwrap();
+    fs::write(notes_dir.path().join("b.txt"), "分布式共识算法").unwrap();
+    engine.add_collection("notes", notes_dir.path()).unwrap();
+    engine.index().await.unwrap();
+
+    assert_eq!(engine.status().unwrap().documents, 2);
+    assert!(engine.status().unwrap().chunks > 0);
+
+    engine.del("notes").unwrap();
+
+    let status = engine.status().unwrap();
+    assert_eq!(status.documents, 0);
+    assert_eq!(status.chunks, 0);
+    assert!(status.collections.is_empty());
+    let hits = engine.search("生日", 5).await.unwrap();
+    assert!(
+      hits.iter().all(|h| !h.chunk.text.contains("生日")),
+      "deleted data must not stay searchable"
+    );
+  }
+
+  #[tokio::test]
+  async fn test_engine_del_unknown_collection_errors() {
+    let tmp = TempDir::new().unwrap();
+    let engine = Engine::new(test_components(test_storage(&tmp)));
+    assert!(engine.del("missing").is_err());
+  }
+
+  #[tokio::test]
+  async fn test_engine_del_document_removes_single_file() {
+    let tmp = TempDir::new().unwrap();
+    let engine = Engine::new(test_components(test_storage(&tmp)));
+
+    let notes_dir = TempDir::new().unwrap();
+    fs::write(notes_dir.path().join("a.txt"), "今天是我的生日").unwrap();
+    fs::write(notes_dir.path().join("b.txt"), "分布式共识算法").unwrap();
+    engine.add_collection("notes", notes_dir.path()).unwrap();
+    engine.index().await.unwrap();
+    assert_eq!(engine.status().unwrap().documents, 2);
+
+    engine.del_document(notes_dir.path().join("a.txt")).unwrap();
+
+    let status = engine.status().unwrap();
+    assert_eq!(status.documents, 1);
+    assert_eq!(status.collections.len(), 1);
+    let hits = engine.search("生日", 5).await.unwrap();
+    assert!(hits.iter().all(|h| !h.chunk.text.contains("生日")));
+    let hits = engine.search("共识算法", 5).await.unwrap();
+    assert!(hits.iter().any(|h| h.chunk.text.contains("共识算法")));
+  }
+
+  #[tokio::test]
+  async fn test_engine_del_keeps_documents_covered_by_another_collection() {
+    let tmp = TempDir::new().unwrap();
+    let engine = Engine::new(test_components(test_storage(&tmp)));
+
+    let root = TempDir::new().unwrap();
+    let sub = root.path().join("sub");
+    fs::create_dir(&sub).unwrap();
+    fs::write(sub.join("note.txt"), "今天是我的生日").unwrap();
+    engine.add_collection("all", root.path()).unwrap();
+    engine.add_collection("sub", &sub).unwrap();
+    engine.index().await.unwrap();
+    assert_eq!(engine.status().unwrap().documents, 1);
+
+    engine.del("sub").unwrap();
+    let status = engine.status().unwrap();
+    assert_eq!(status.documents, 1, "the file is still covered by the 'all' collection");
+    assert_eq!(status.collections.len(), 1);
+
+    engine.del("all").unwrap();
+    assert_eq!(engine.status().unwrap().documents, 0);
   }
 
   #[tokio::test]
